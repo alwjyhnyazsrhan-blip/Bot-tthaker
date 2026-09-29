@@ -1,5 +1,6 @@
 import { WebookEvent, Seat, SeatingMapData, SeatingSection, TicketTier, VenueBlueprintId } from '../types/bot';
 import { REAL_WEBOOK_LIVE_CATALOG } from '../data/realWebookCatalog';
+import { playReservationChime } from '../utils/audioAlert';
 
 import {
   generateVenueSeatingMap,
@@ -519,6 +520,9 @@ export interface WebookSyncStatus {
   activeSessions: number;
   connectedToWebookApi: boolean;
   syncIntervalSeconds: number;
+  isPollingActive: boolean;
+  lastPolledTimestamp?: string;
+  newReleasesCount?: number;
 }
 
 class WebookSyncManager {
@@ -544,19 +548,26 @@ class WebookSyncManager {
   })();
 
   private listeners: ((events: WebookEvent[], status: WebookSyncStatus) => void)[] = [];
-  private syncTimer: NodeJS.Timeout | null = null;
+  private pollIntervalId: any = null;
+  private newReleaseListeners: ((newEvents: WebookEvent[]) => void)[] = [];
   private status: WebookSyncStatus = {
     lastSyncTimestamp: new Date().toLocaleTimeString('ar-SA'),
     isSyncing: false,
     totalEventsSynced: REAL_WEBOOK_LIVE_CATALOG.length,
     activeSessions: 1,
     connectedToWebookApi: true,
-    syncIntervalSeconds: 30,
+    syncIntervalSeconds: 15,
+    isPollingActive: false,
+    newReleasesCount: 0,
   };
 
   constructor() {
     this.status.totalEventsSynced = this.events.length;
-    // Auto-sync is completely stopped as requested by user - only manual user requests run
+    // Auto-fetch full catalog and start real-time polling
+    setTimeout(() => {
+      this.fetchAllEventsWithPagination();
+      this.startRealtimePolling(15000);
+    }, 100);
   }
 
   public getEvents(): WebookEvent[] {
@@ -567,23 +578,240 @@ class WebookSyncManager {
     return this.status;
   }
 
-  public forceSyncNow(): void {
+  /**
+   * Fetches the FULL official catalog from Webook API (handling all 440+ events),
+   * dynamically enriching each event with its venue blueprint and seating map.
+   */
+  public async fetchAllEventsWithPagination(
+    token?: string,
+    onProgress?: (loaded: number, total: number) => void
+  ): Promise<WebookEvent[]> {
     this.status.isSyncing = true;
     this.notify();
 
-    fetch('/api/webook/live-events')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data?.count) {
-          this.status.totalEventsSynced = Math.max(this.events.length, data.count);
-        }
-      })
-      .catch(() => null)
-      .finally(() => {
-        this.status.isSyncing = false;
-        this.status.lastSyncTimestamp = new Date().toLocaleTimeString('ar-SA');
-        this.notify();
+    try {
+      const cleanToken = token?.trim();
+      const headers: Record<string, string> = { 'Accept': 'application/json' };
+      if (cleanToken) {
+        headers['Authorization'] = `Bearer ${cleanToken}`;
+      }
+
+      console.log('[WEBOOK SYNC MANAGER] Fetching full official catalog (all=true)...');
+      const response = await fetch('/api/webook/live-catalog?all=true', {
+        method: 'GET',
+        headers,
       });
+
+      if (!response.ok) {
+        throw new Error(`API returned HTTP ${response.status}`);
+      }
+
+      const json = await response.json();
+      if (json && json.success && Array.isArray(json.data)) {
+        const rawList = json.data;
+        const total = json.total || rawList.length;
+
+        const processedEvents: WebookEvent[] = rawList.map((raw: any) => {
+          const bp = (raw.venueBlueprint as VenueBlueprintId) || 
+            detectVenueBlueprint(`${raw.title || ''} ${raw.titleAr || ''} ${raw.slug || ''}`, raw.locationAr || raw.location || '', raw.category || '');
+          const seatingMap = generateVenueSeatingMapByBlueprint(bp, raw.locationAr || raw.titleAr, raw.tiers || []);
+
+          return {
+            ...raw,
+            id: raw.id || raw.slug,
+            slug: raw.slug || raw.id,
+            title: raw.title || raw.titleAr,
+            titleAr: raw.titleAr || raw.title,
+            url: raw.url || `https://webook.com/ar/events/${raw.slug || raw.id}`,
+            category: raw.category || 'فعاليات Webook',
+            location: raw.location || 'Saudi Arabia',
+            locationAr: raw.locationAr || 'المملكة العربية السعودية',
+            date: raw.date || 'متاح للحجز الفوري',
+            datesAvailable: raw.datesAvailable && raw.datesAvailable.length > 0 ? raw.datesAvailable : ['2026-10-15', '2026-10-16', '2026-10-20'],
+            timesAvailable: raw.timesAvailable && raw.timesAvailable.length > 0 ? raw.timesAvailable : ['20:00 - 23:00'],
+            image: raw.image || 'https://images.unsplash.com/photo-1540039155733-5bb30b53aa14?q=80&w=800&auto=format&fit=crop',
+            tiers: raw.tiers || [],
+            seatingMap,
+            isHot: Boolean(raw.isHot),
+            newRelease: Boolean(raw.newRelease),
+            venueType: raw.venueType,
+            isSeated: Boolean(raw.isSeated),
+            bookingSeatsWithoutMap: Boolean(raw.bookingSeatsWithoutMap),
+            teams: raw.teams,
+            subEvents: raw.subEvents,
+          };
+        });
+
+        // Deduplicate against existing custom events
+        const seen = new Set<string>();
+        const merged: WebookEvent[] = [];
+
+        for (const e of processedEvents) {
+          if (!seen.has(e.id)) {
+            seen.add(e.id);
+            merged.push(e);
+          }
+        }
+
+        // Retain any user-imported custom events
+        for (const old of this.events) {
+          if (old.id.startsWith('custom-') && !seen.has(old.id)) {
+            merged.unshift(old);
+            seen.add(old.id);
+          }
+        }
+
+        this.events = merged;
+        this.status.totalEventsSynced = this.events.length;
+        this.status.lastSyncTimestamp = new Date().toLocaleTimeString('ar-SA');
+        if (onProgress) onProgress(merged.length, total);
+        console.log(`[WEBOOK SYNC MANAGER] Full catalog synchronized: ${this.events.length} events loaded.`);
+      }
+    } catch (err: any) {
+      console.warn('[WEBOOK SYNC MANAGER] Failed to fetch full catalog:', err.message);
+    } finally {
+      this.status.isSyncing = false;
+      this.notify();
+    }
+
+    return this.events;
+  }
+
+  /**
+   * Starts real-time polling to check the platform API and automatically
+   * inject newly released events into the app instantly.
+   */
+  public startRealtimePolling(intervalMs: number = 15000) {
+    if (this.pollIntervalId) {
+      clearInterval(this.pollIntervalId);
+    }
+
+    this.status.isPollingActive = true;
+    this.status.syncIntervalSeconds = Math.round(intervalMs / 1000);
+    this.notify();
+
+    console.log(`[WEBOOK REAL-TIME POLLING] Started continuous interval sync (${intervalMs}ms)...`);
+
+    this.pollIntervalId = setInterval(async () => {
+      try {
+        const knownCount = this.events.length;
+        const res = await fetch(`/api/webook/live-catalog/poll?knownCount=${knownCount}`);
+        if (!res.ok) return;
+
+        const data = await res.json();
+        this.status.lastPolledTimestamp = new Date().toLocaleTimeString('ar-SA');
+
+        if (data && data.success && data.hasNew && Array.isArray(data.newEvents) && data.newEvents.length > 0) {
+          console.log(`[WEBOOK REAL-TIME POLLING] 🚨 Detected ${data.newEvents.length} newly released events! Injecting instantly...`);
+
+          const newlyInjected: WebookEvent[] = [];
+          for (const raw of data.newEvents) {
+            if (this.events.some((e) => e.id === raw.id || e.slug === raw.slug)) {
+              continue;
+            }
+
+            const bp = (raw.venueBlueprint as VenueBlueprintId) || 
+              detectVenueBlueprint(`${raw.title || ''} ${raw.titleAr || ''} ${raw.slug || ''}`, raw.locationAr || '', raw.category || '');
+            const seatingMap = generateVenueSeatingMapByBlueprint(bp, raw.locationAr || raw.titleAr, raw.tiers || []);
+
+            const formatted: WebookEvent = {
+              ...raw,
+              id: raw.id || raw.slug,
+              slug: raw.slug || raw.id,
+              title: raw.title || raw.titleAr,
+              titleAr: raw.titleAr || raw.title,
+              url: raw.url || `https://webook.com/ar/events/${raw.slug || raw.id}`,
+              category: raw.category || 'رياضة ومباريات',
+              location: raw.location || 'Kingdom Arena, Riyadh',
+              locationAr: raw.locationAr || 'المملكة أرينا، الرياض',
+              date: raw.date || 'إطلاق تذاكر رسمي عاجل',
+              datesAvailable: raw.datesAvailable || ['2026-10-18'],
+              timesAvailable: raw.timesAvailable || ['20:30 - 23:00'],
+              image: raw.image || 'https://images.unsplash.com/photo-1508098682722-e99c43a406b2?q=80&w=1200&auto=format&fit=crop',
+              tiers: raw.tiers || [],
+              seatingMap,
+              isHot: true,
+              newRelease: true,
+              venueType: raw.venueType || 'stadium',
+              isSeated: raw.isSeated ?? true,
+              bookingSeatsWithoutMap: raw.bookingSeatsWithoutMap ?? false,
+              teams: raw.teams,
+              subEvents: raw.subEvents,
+            };
+
+            newlyInjected.push(formatted);
+          }
+
+          if (newlyInjected.length > 0) {
+            this.events = [...newlyInjected, ...this.events];
+            this.status.totalEventsSynced = this.events.length;
+            this.status.newReleasesCount = (this.status.newReleasesCount || 0) + newlyInjected.length;
+            this.status.lastSyncTimestamp = new Date().toLocaleTimeString('ar-SA');
+            
+            // Audio alert notification
+            try {
+              playReservationChime();
+            } catch {}
+
+            // Notify subscribers
+            this.notify();
+            this.newReleaseListeners.forEach((cb) => cb(newlyInjected));
+          }
+        }
+      } catch (err: any) {
+        console.warn('[WEBOOK REAL-TIME POLLING] Poll error:', err.message);
+      }
+    }, intervalMs);
+  }
+
+  public stopRealtimePolling() {
+    if (this.pollIntervalId) {
+      clearInterval(this.pollIntervalId);
+      this.pollIntervalId = null;
+    }
+    this.status.isPollingActive = false;
+    this.notify();
+    console.log('[WEBOOK REAL-TIME POLLING] Stopped.');
+  }
+
+  public isPollingActive(): boolean {
+    return this.status.isPollingActive;
+  }
+
+  public onNewRelease(callback: (newEvents: WebookEvent[]) => void): () => void {
+    this.newReleaseListeners.push(callback);
+    return () => {
+      this.newReleaseListeners = this.newReleaseListeners.filter((cb) => cb !== callback);
+    };
+  }
+
+  /**
+   * Helper to trigger a live newly released event on the server to immediately test
+   * real-time polling detection and auto-injection.
+   */
+  public async triggerReleaseSimulation(titleAr?: string, venue?: string): Promise<boolean> {
+    try {
+      const res = await fetch('/api/webook/live-catalog/trigger-release', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ titleAr, venue }),
+      });
+      const data = await res.json();
+      if (data && data.success) {
+        // Trigger immediate polling check
+        setTimeout(() => {
+          this.forceSyncNow();
+        }, 100);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  public forceSyncNow(): void {
+    this.fetchAllEventsWithPagination();
   }
 
   public async syncEventWithOfficialWebook(slugOrUrl: string): Promise<WebookEvent | null> {

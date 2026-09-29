@@ -10,12 +10,13 @@ import { BotSettings } from './components/BotSettings';
 import { BotGuideModal } from './components/BotGuideModal';
 import { InstantAutoBookerModal } from './components/InstantAutoBookerModal';
 import { ZeroTouchAutoInjectorModal } from './components/ZeroTouchAutoInjectorModal';
+import { DynamicSchemaWorkflow } from './components/DynamicSchemaWorkflow';
 import { Account, BotConfig, BotLog, WebookEvent, Seat, TicketTier, SeatingMapData, ReservationErrorState, ReservationFallbackPayload } from './types/bot';
 import { LIVE_WEBOOK_CATALOG, detectVenueBlueprint, generateVenueSeatingMapByBlueprint, webookSyncManager } from './services/webookSyncService';
 import { generateSeleniumPythonScript } from './utils/codeGenerators';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'explore' | 'map' | 'runner' | 'code' | 'accounts' | 'settings'>('explore');
+  const [activeTab, setActiveTab] = useState<'explore' | 'pipeline' | 'map' | 'runner' | 'code' | 'accounts' | 'settings'>('pipeline');
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [isInstantAutoBookerOpen, setIsInstantAutoBookerOpen] = useState<boolean>(false);
   const [isZeroTouchOpen, setIsZeroTouchOpen] = useState<boolean>(false);
@@ -387,7 +388,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Tab 0: Official Webook Explorer Platform (Default View!) */}
+        {/* Tab 0: Official Webook Explorer Platform */}
         {activeTab === 'explore' && (
           <div className="space-y-6">
             <EventSelector
@@ -397,6 +398,7 @@ export default function App() {
               config={botConfig}
               onUpdateConfig={handleUpdateConfig}
               onSwitchToMapTab={() => setActiveTab('map')}
+              onSwitchToPipelineTab={() => setActiveTab('pipeline')}
               accounts={accounts}
               onUpdateEvents={(updatedEvents) => {
                 setEvents(updatedEvents);
@@ -415,6 +417,21 @@ export default function App() {
           </div>
         )}
 
+        {/* Tab: Dynamic Schema-Driven Booking Workflow (Parsed entirely from live official JSON schema) */}
+        {activeTab === 'pipeline' && (
+          <div className="space-y-6">
+            <DynamicSchemaWorkflow
+              events={events}
+              currentEvent={currentEvent}
+              onSelectEvent={handleSelectEvent}
+              selectedSeats={selectedSeats}
+              onToggleSeat={handleToggleSeat}
+              accounts={accounts}
+              onUpdateEventTiers={handleUpdateEventTiers}
+            />
+          </div>
+        )}
+
         {/* Tab 1: Official Interactive Seating Map (مخطط المقاعد الرسمي) */}
         {activeTab === 'map' && (
           <div className="space-y-6">
@@ -426,6 +443,7 @@ export default function App() {
               config={botConfig}
               onUpdateConfig={handleUpdateConfig}
               onSwitchToMapTab={() => setActiveTab('map')}
+              onSwitchToPipelineTab={() => setActiveTab('pipeline')}
               accounts={accounts}
               onUpdateEvents={(updatedEvents) => {
                 setEvents(updatedEvents);

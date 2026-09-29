@@ -109,8 +109,9 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
         setIsReserved(true);
         setIsCustomTestPayload(Boolean(data.isCustomPayload));
         setApiError(null);
-        // Automatically open the verified event booking checkout screen directly
-        window.open(directBookingUrl, '_blank', 'noopener,noreferrer');
+        const dynamicCheckoutUrl = data.dynamicCheckoutUrl || `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(data.cartId)}&event=${encodeURIComponent(event.slug)}`;
+        // Automatically open the verified dynamic checkout screen with the active cart_id to prevent 404!
+        window.open(dynamicCheckoutUrl, '_blank', 'noopener,noreferrer');
       } else {
         // Honest error handling - no fake confirmation modal!
         setIsReserved(false);
@@ -370,12 +371,12 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
                 </button>
 
                 <a
-                  href={getWebookDirectCheckoutUrl()}
+                  href={cartId ? `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(cartId)}&event=${encodeURIComponent(event.slug)}` : getWebookDirectCheckoutUrl()}
                   target="_blank"
                   rel="noreferrer"
                   className="px-4 py-2 bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 text-xs font-black rounded-xl shadow-md transition flex items-center gap-1.5"
                 >
-                  <span>💳 شاشة الدفع (/checkout)</span>
+                  <span>💳 شاشة الدفع بالسلة النشطة (/checkout?cart_id=...)</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
 

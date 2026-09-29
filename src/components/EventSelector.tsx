@@ -2,10 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { 
   Calendar, MapPin, Ticket, ExternalLink, Sparkles, 
   Search, Check, Filter, Layers, Flame, ArrowRight, Eye, ChevronDown, 
-  RefreshCw, AlertCircle, Key, Globe, ShieldAlert, CheckCircle2, Terminal, Copy
+  RefreshCw, AlertCircle, Key, Globe, ShieldAlert, CheckCircle2, Terminal, Copy, Zap
 } from 'lucide-react';
 import { WebookEvent, BotConfig, Account, TicketTier } from '../types/bot';
 import { generateVenueSeatingMap, detectVenueBlueprint, generateVenueSeatingMapByBlueprint } from '../services/venueSeatingService';
+import { webookSyncManager } from '../services/webookSyncService';
 
 interface EventSelectorProps {
   events: WebookEvent[];
@@ -14,6 +15,7 @@ interface EventSelectorProps {
   config: BotConfig;
   onUpdateConfig: (config: Partial<BotConfig>) => void;
   onSwitchToMapTab?: () => void;
+  onSwitchToPipelineTab?: () => void;
   accounts?: Account[];
   onUpdateEvents?: (events: WebookEvent[]) => void;
 }
@@ -25,6 +27,7 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
   config,
   onUpdateConfig,
   onSwitchToMapTab,
+  onSwitchToPipelineTab,
   accounts = [],
   onUpdateEvents,
 }) => {
@@ -54,6 +57,14 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
     timestamp: string;
     tiersTotalCount: number;
   } | null>(null);
+
+  // Pagination & Full Catalog Sync State
+  const [syncScope, setSyncScope] = useState<'all' | 'paginated'>('all');
+  const [page, setPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(24);
+  const [totalPages, setTotalPages] = useState<number>(1);
+  const [isSimulatingRelease, setIsSimulatingRelease] = useState<boolean>(false);
+  const [releaseFeedback, setReleaseFeedback] = useState<string>('');
 
   // Automatically sync authToken from active accounts if available and not yet set
   useEffect(() => {
@@ -89,8 +100,29 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
     return matchesSearch && matchesCategory;
   });
 
+  const handleSimulateNewRelease = async () => {
+    setIsSimulatingRelease(true);
+    setReleaseFeedback('');
+    try {
+      const ok = await webookSyncManager.triggerReleaseSimulation(
+        'نهائي كأس السوبر السعودي: الهلال ضد الاتحاد (المملكة أرينا)',
+        'المملكة أرينا، الرياض'
+      );
+      if (ok) {
+        setReleaseFeedback('تم رصد طرح الفعالية الجديدة في المنصة وحقنها فوراً في البوت!');
+        setTimeout(() => setReleaseFeedback(''), 6000);
+      } else {
+        setReleaseFeedback('فشل محاكاة الطرح');
+      }
+    } catch (err: any) {
+      setReleaseFeedback(err.message);
+    } finally {
+      setIsSimulatingRelease(false);
+    }
+  };
+
   // Real fetch request to retrieve live event catalogs and pricing tiers directly from the platform
-  const handleFetchLiveEvents = async () => {
+  const handleFetchLiveEvents = async (targetPage?: number) => {
     const cleanEndpoint = apiEndpoint.trim();
     if (!cleanEndpoint) {
       setFetchError({
@@ -98,6 +130,11 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
         endpoint: cleanEndpoint,
       });
       return;
+    }
+
+    const effectivePage = targetPage !== undefined ? targetPage : page;
+    if (targetPage !== undefined) {
+      setPage(targetPage);
     }
 
     setIsFetchingLive(true);
@@ -112,13 +149,20 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
       headers['Authorization'] = `Bearer ${cleanToken}`;
     }
 
+    let resolvedUrl = cleanEndpoint;
+    if (cleanEndpoint.includes('/api/webook/live-catalog') && !cleanEndpoint.includes('?')) {
+      resolvedUrl = syncScope === 'all' 
+        ? `${cleanEndpoint}?all=true`
+        : `${cleanEndpoint}?page=${effectivePage}&limit=${pageSize}`;
+    }
+
     try {
       let response: Response;
       let jsonData: any = null;
 
       // Execute a real JavaScript fetch request directly with proper Bearer token headers
       try {
-        response = await fetch(cleanEndpoint, {
+        response = await fetch(resolvedUrl, {
           method: 'GET',
           headers,
         });
@@ -143,7 +187,7 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
             ...(cleanToken ? { 'Authorization': `Bearer ${cleanToken}` } : {})
           },
           body: JSON.stringify({
-            endpoint: cleanEndpoint,
+            endpoint: resolvedUrl,
             authToken: cleanToken || undefined,
           }),
         });
@@ -491,6 +535,105 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
             </div>
           </div>
 
+          {/* Scope Selector: Full List vs Pagination */}
+          <div className="bg-slate-900/60 p-3.5 rounded-xl border border-slate-800 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <span className="text-xs font-bold text-slate-300">
+                محددات طلب الجلب (Fetch Parameters & Pagination):
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSyncScope('all')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
+                    syncScope === 'all'
+                      ? 'bg-purple-600 text-white border-purple-500 shadow-sm'
+                      : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                  }`}
+                >
+                  كامل الدليل (Full List: ?all=true • 440+ فعالية)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSyncScope('paginated')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
+                    syncScope === 'paginated'
+                      ? 'bg-purple-600 text-white border-purple-500 shadow-sm'
+                      : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                  }`}
+                >
+                  تقسيم الصفحات (Pagination: ?page={page}&limit={pageSize})
+                </button>
+              </div>
+            </div>
+
+            {/* Pagination Controls if Paginated */}
+            {syncScope === 'paginated' && (
+              <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-xs">
+                <span className="text-slate-400">
+                  الصفحة الحالية: <strong className="text-white font-mono">{page}</strong> / {totalPages || 19}
+                </span>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={page <= 1 || isFetchingLive}
+                    onClick={() => handleFetchLiveEvents(page - 1)}
+                    className="px-3 py-1 bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-slate-300 rounded-lg border border-slate-800 transition"
+                  >
+                    السابقة
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isFetchingLive}
+                    onClick={() => handleFetchLiveEvents(page + 1)}
+                    className="px-3 py-1 bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-slate-300 rounded-lg border border-slate-800 transition"
+                  >
+                    التالية
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Continuous Real-time Polling & Live Release Simulation */}
+          <div className="bg-slate-900/40 p-3.5 rounded-xl border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+              </span>
+              <div>
+                <span className="text-xs font-bold text-white block">
+                  المزامنة الحية التلقائية مستمرة (Live Polling Active)
+                </span>
+                <span className="text-[11px] text-slate-400 block -mt-0.5">
+                  فحص دوري كل 15 ثانية لرصد أي طرح تذاكر جديد على المنصة وحقنه في البوت فوراً.
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSimulateNewRelease}
+                disabled={isSimulatingRelease}
+                className="px-3.5 py-1.5 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-slate-950 font-black text-xs rounded-xl shadow-md transition cursor-pointer flex items-center gap-1.5"
+                title="محاكاة إطلاق فعالية جديدة في المنصة ورصدها بالبولينج التلقائي"
+              >
+                <Zap className="w-3.5 h-3.5 fill-current" />
+                <span>{isSimulatingRelease ? 'جاري الطرح...' : '⚡ تجربة رصد طرح فوري'}</span>
+              </button>
+            </div>
+          </div>
+
+          {releaseFeedback && (
+            <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-500/40 text-amber-300 text-xs flex items-center gap-2 animate-in fade-in">
+              <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>{releaseFeedback}</span>
+            </div>
+          )}
+
           {/* Real Fetch Action Button */}
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
             <div className="text-xs text-slate-400">
@@ -499,7 +642,7 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
 
             <button
               type="button"
-              onClick={handleFetchLiveEvents}
+              onClick={() => handleFetchLiveEvents()}
               disabled={isFetchingLive}
               className="px-6 py-2.5 bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-600 hover:from-purple-500 hover:to-indigo-500 text-white font-black text-xs rounded-xl shadow-lg shadow-purple-600/30 transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
             >
@@ -742,22 +885,47 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
               </div>
 
               {/* Action Footer */}
-              <div className="p-3 border-t border-slate-800/80 bg-slate-950/40 flex items-center justify-between">
-                <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1">
-                  <span>فتح المخطط وحجز المقاعد</span>
-                  <ArrowRight className="w-3 h-3 text-purple-400" />
-                </span>
-
-                <a
-                  href={event.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="p-1.5 text-slate-400 hover:text-pink-400 hover:bg-slate-800 rounded-lg transition"
-                  title="عرض الفعالية على موقع Webook الرسمي"
+              <div className="p-3 border-t border-slate-800/80 bg-slate-950/40 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectEvent(event);
+                    onUpdateConfig({
+                      targetEventUrl: event.url,
+                      selectedEventId: event.id,
+                      selectedDate: event.datesAvailable[0] || '2026-10-15',
+                      selectedTime: event.timesAvailable[0] || '20:30 - 23:00',
+                    });
+                    if (onSwitchToPipelineTab) {
+                      onSwitchToPipelineTab();
+                    } else if (onSwitchToMapTab) {
+                      onSwitchToMapTab();
+                    }
+                  }}
+                  className="px-3 py-1.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-[11px] font-bold flex items-center gap-1 transition shadow-sm cursor-pointer"
                 >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
+                  <Sparkles className="w-3 h-3 text-amber-300" />
+                  <span>مسار الـ 5 خطوات</span>
+                </button>
+
+                <div className="flex items-center gap-1">
+                  <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1">
+                    <span>المخطط</span>
+                    <ArrowRight className="w-3 h-3 text-purple-400" />
+                  </span>
+
+                  <a
+                    href={event.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="p-1.5 text-slate-400 hover:text-pink-400 hover:bg-slate-800 rounded-lg transition"
+                    title="عرض الفعالية على موقع Webook الرسمي"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
               </div>
             </div>
           );

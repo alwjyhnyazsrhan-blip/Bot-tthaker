@@ -95,6 +95,27 @@ export interface TicketTier {
   color?: string;
 }
 
+export interface TeamInfo {
+  name: string;
+  nameAr: string;
+  logo?: string;
+  color?: string;
+}
+
+export interface SubEvent {
+  id: string;
+  title: string;
+  titleAr: string;
+  date: string;
+  time: string;
+  teams?: {
+    home: TeamInfo;
+    away: TeamInfo;
+  };
+  venueName?: string;
+  venueNameAr?: string;
+}
+
 export interface WebookEvent {
   id: string;
   title: string;
@@ -116,7 +137,83 @@ export interface WebookEvent {
   termsAr?: string[];
   tiers: TicketTier[];
   isHot?: boolean;
+  newRelease?: boolean;
+  venueType?: string;
+  isSeated?: boolean;
+  bookingSeatsWithoutMap?: boolean;
   seatingMap: SeatingMapData;
+  subEvents?: SubEvent[];
+  teams?: {
+    home: TeamInfo;
+    away: TeamInfo;
+  };
+  selectedTeam?: 'home' | 'away' | 'neutral';
+}
+
+export interface DynamicPipelineStepConfig {
+  id: string;
+  stepNumber: PipelineStepNumber;
+  name: string;
+  nameAr: string;
+  badgeAr: string;
+  descriptionAr: string;
+  isMandatory: boolean;
+  isApplicable: boolean;
+}
+
+export interface EventJsonSchema {
+  isSeated: boolean;
+  bookingSeatsWithoutMap: boolean;
+  hasTeams: boolean;
+  hasSubEvents: boolean;
+  hasTimeSlots: boolean;
+  hasMultipleDates: boolean;
+  teams?: {
+    home: TeamInfo;
+    away: TeamInfo;
+  };
+  timeSlotsCount: number;
+  datesCount: number;
+  subEventsCount: number;
+  tiersCount: number;
+  requiredSteps: DynamicPipelineStepConfig[];
+}
+
+export type PipelineStepNumber = 1 | 2 | 3 | 4 | 5;
+
+export interface PipelineStepLog {
+  step: PipelineStepNumber;
+  status: 'idle' | 'running' | 'success' | 'error';
+  title: string;
+  titleAr: string;
+  endpoint?: string;
+  method?: 'GET' | 'POST';
+  requestHeaders?: Record<string, string>;
+  requestPayload?: any;
+  responsePayload?: any;
+  statusCode?: number;
+  message?: string;
+  timestamp: string;
+}
+
+export interface ActiveCartSession {
+  cartId: string;
+  holdToken?: string;
+  sessionToken?: string;
+  expiresAt: string;
+  totalPrice: number;
+  currency: string;
+  seats: Seat[];
+  tierName?: string;
+  ticketQuantity: number;
+  dynamicCheckoutUrl: string;
+  directBookingUrl: string;
+  selectedDate: string;
+  selectedTime: string;
+  selectedTeam?: string;
+  selectedSubEvent?: SubEvent;
+  isRealPlatformCart?: boolean;
+  status: 'active' | 'expired' | 'released';
 }
 
 export interface BotConfig {

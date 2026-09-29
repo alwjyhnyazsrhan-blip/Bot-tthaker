@@ -1503,24 +1503,24 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
               </button>
 
               <a
-                href={getWebookDirectCheckoutUrl()}
+                href={cartHoldInfo?.cartId ? `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(cartHoldInfo.cartId)}&event=${encodeURIComponent(event.slug)}` : getWebookDirectCheckoutUrl()}
                 target="_blank"
                 rel="noreferrer"
                 className="w-full sm:w-auto px-5 py-3 bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-2"
               >
                 <CreditCard className="w-4 h-4 fill-slate-950" />
-                <span>💳 شاشة الدفع والسداد (/checkout)</span>
+                <span>💳 شاشة الدفع بالسلة النشطة (/checkout?cart_id=...)</span>
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
 
               <a
-                href={directBookingUrl}
+                href={cartHoldInfo?.cartId ? `${directBookingUrl}?cart_id=${encodeURIComponent(cartHoldInfo.cartId)}` : directBookingUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="w-full sm:w-auto px-4 py-3 bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-2"
               >
                 <Zap className="w-4 h-4 text-amber-300 fill-amber-300" />
-                <span>⚡ مسار حجز التذاكر المباشر (/book)</span>
+                <span>⚡ مسار حجز التذاكر المباشر بالسلة (/book?cart_id=...)</span>
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
 
