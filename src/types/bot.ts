@@ -24,8 +24,22 @@ export interface SeatingSection {
   rows: string[];
 }
 
+export type VenueBlueprintId = 
+  | 'kingdom_arena'
+  | 'alawwal_park'
+  | 'aljawhara'
+  | 'mohammed_abdo_arena'
+  | 'bakr_sheddi'
+  | 'boxing_ring'
+  | 'equestrian'
+  | 'boulevard_world'
+  | 'general_stadium'
+  | 'general_theater';
+
 export interface SeatingMapData {
-  type: 'theater' | 'stadium' | 'concert' | 'zone';
+  type: 'theater' | 'stadium' | 'concert' | 'zone' | string;
+  venueId?: VenueBlueprintId;
+  venueNameAr?: string;
   stageLabelAr: string;
   totalSeats: number;
   availableSeats: number;
@@ -41,6 +55,33 @@ export interface Account {
   status: 'idle' | 'ready' | 'logging_in' | 'active' | 'success' | 'error';
   lastLog?: string;
   ticketsReserved?: number;
+  webookSessionToken?: string;
+  authToken?: string;
+  refreshToken?: string;
+  isRealToken?: boolean;
+  authError?: string;
+  customAuthPayload?: string;
+  webookCookies?: string;
+}
+
+export interface ReservationFallbackPayload {
+  cartId?: string;
+  holdExpiresAt?: string;
+  totalPrice?: number;
+  seats?: Array<{ id: string; label?: string; price?: number; row?: string; number?: number }>;
+  directBookingUrl?: string;
+  directCheckoutUrl?: string;
+  isCustomPayload?: boolean;
+  customRawJson?: string;
+}
+
+export interface ReservationErrorState {
+  hasError: boolean;
+  message: string;
+  endpoint: string;
+  requestPayload?: any;
+  rawError?: any;
+  timestamp?: string;
 }
 
 export interface TicketTier {

@@ -9,28 +9,19 @@ import { EventSelector } from './components/EventSelector';
 import { BotSettings } from './components/BotSettings';
 import { BotGuideModal } from './components/BotGuideModal';
 import { InstantAutoBookerModal } from './components/InstantAutoBookerModal';
-import { LiveWebookSyncBanner } from './components/LiveWebookSyncBanner';
-import { Account, BotConfig, BotLog, WebookEvent, Seat } from './types/bot';
-import { webookSyncManager, WebookSyncStatus, LIVE_WEBOOK_CATALOG } from './services/webookSyncService';
+import { ZeroTouchAutoInjectorModal } from './components/ZeroTouchAutoInjectorModal';
+import { Account, BotConfig, BotLog, WebookEvent, Seat, TicketTier, SeatingMapData, ReservationErrorState, ReservationFallbackPayload } from './types/bot';
+import { LIVE_WEBOOK_CATALOG, detectVenueBlueprint, generateVenueSeatingMapByBlueprint, webookSyncManager } from './services/webookSyncService';
 import { generateSeleniumPythonScript } from './utils/codeGenerators';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'explore' | 'map' | 'runner' | 'code' | 'accounts' | 'settings'>('explore');
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [isInstantAutoBookerOpen, setIsInstantAutoBookerOpen] = useState<boolean>(false);
+  const [isZeroTouchOpen, setIsZeroTouchOpen] = useState<boolean>(false);
 
-  // Synced events from Webook
+  // Events list initialized with live catalog
   const [events, setEvents] = useState<WebookEvent[]>(LIVE_WEBOOK_CATALOG);
-  const [syncStatus, setSyncStatus] = useState<WebookSyncStatus>(webookSyncManager.getStatus());
-
-  // Subscribe to live auto-sync updates
-  useEffect(() => {
-    const unsubscribe = webookSyncManager.subscribe((updatedEvents, status) => {
-      setEvents(updatedEvents);
-      setSyncStatus(status);
-    });
-    return () => unsubscribe();
-  }, []);
 
   // Accounts state: Empty by default so the user is the one who adds their own Webook accounts!
   const [accounts, setAccounts] = useState<Account[]>(() => {
@@ -75,7 +66,9 @@ export default function App() {
     expiresAt: string;
     totalPrice: number;
     active: boolean;
+    isCustomPayload?: boolean;
   } | null>(null);
+  const [reservationError, setReservationError] = useState<ReservationErrorState | null>(null);
 
   // Bot configuration
   const [botConfig, setBotConfig] = useState<BotConfig>({
@@ -117,7 +110,7 @@ export default function App() {
       id: 'l3',
       timestamp: new Date().toLocaleTimeString('ar-SA'),
       level: 'success',
-      message: 'نظام المزامنة التلقائي يعمل في الخلفية كل 30 ثانية لتحديث المقاعد والأسعار.',
+      message: 'التحكم اليدوي مفعّل بالكامل: يتم جلب وتحديث الفعاليات عند النقر على Fetch Events.',
     },
   ]);
 
@@ -156,18 +149,44 @@ export default function App() {
     setBotConfig((prev) => ({ ...prev, ...newConfig }));
   };
 
+  const handleUpdateEventTiers = (updatedTiers: TicketTier[], updatedMap: SeatingMapData) => {
+    setCurrentEvent((prev) => ({
+      ...prev,
+      tiers: updatedTiers,
+      seatingMap: updatedMap,
+    }));
+    setEvents((prev) =>
+      prev.map((e) => (e.id === currentEvent.id ? { ...e, tiers: updatedTiers, seatingMap: updatedMap } : e))
+    );
+    const available = updatedMap.seats.filter((s) => s.status === 'available');
+    setSelectedSeats(available.slice(0, botConfig.ticketQuantity || 2));
+    handleUpdateLog({
+      id: Math.random().toString(36).substring(7),
+      timestamp: new Date().toLocaleTimeString(),
+      level: 'success',
+      message: `تم تحديث المخطط والأسعار الرسمية لـ (${currentEvent.titleAr}) بنجاح.`,
+    });
+  };
+
   const handleSelectEvent = (event: WebookEvent, directToMap: boolean = false) => {
-    setCurrentEvent(event);
+    let effectiveEvent = event;
+    if (!event.seatingMap || !event.seatingMap.venueId) {
+      const blueprint = detectVenueBlueprint(`${event.title || ''} ${event.titleAr || ''} ${event.slug || ''}`, event.locationAr || '', event.category || '');
+      const map = generateVenueSeatingMapByBlueprint(blueprint, event.locationAr || event.titleAr, event.tiers);
+      effectiveEvent = { ...event, seatingMap: map };
+    }
+
+    setCurrentEvent(effectiveEvent);
     setBotConfig((prev) => ({
       ...prev,
-      targetEventUrl: event.url,
-      selectedEventId: event.id,
-      selectedDate: event.datesAvailable[0] || '2026-09-24',
-      selectedTime: event.timesAvailable[0] || '20:00 - 23:00',
+      targetEventUrl: effectiveEvent.url,
+      selectedEventId: effectiveEvent.id,
+      selectedDate: effectiveEvent.datesAvailable[0] || '2026-09-24',
+      selectedTime: effectiveEvent.timesAvailable[0] || '20:00 - 23:00',
     }));
 
     // Auto-pick default available seats for the new event
-    const available = event.seatingMap.seats.filter((s) => s.status === 'available');
+    const available = effectiveEvent.seatingMap.seats.filter((s) => s.status === 'available');
     const firstTwo = available.slice(0, botConfig.ticketQuantity || 2);
     setSelectedSeats(firstTwo);
     setCartHoldInfo(null);
@@ -176,7 +195,7 @@ export default function App() {
       id: Math.random().toString(36).substring(7),
       timestamp: new Date().toLocaleTimeString(),
       level: 'bot',
-      message: `تم اختيار فعالية: ${event.titleAr} (${event.seatingMap.totalSeats} مقعد بالمخطط)`,
+      message: `تم اختيار فعالية: ${effectiveEvent.titleAr} (${effectiveEvent.seatingMap.venueNameAr || effectiveEvent.seatingMap.type})`,
     });
 
     if (directToMap) {
@@ -229,46 +248,23 @@ export default function App() {
     });
   };
 
-  // Force manual sync with Webook
-  const handleForceSync = async () => {
-    handleUpdateLog({
-      id: Math.random().toString(36).substring(7),
-      timestamp: new Date().toLocaleTimeString(),
-      level: 'info',
-      message: 'جاري فحص وتحديث قائمة الفعاليات والمقاعد من منصة webook.com...',
-    });
-
-    try {
-      const res = await fetch('/api/webook/events');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.events && Array.isArray(data.events)) {
-          setEvents(data.events);
-        }
-      }
-    } catch (e) {
-      // Keep state
-    }
-
-    handleUpdateLog({
-      id: Math.random().toString(36).substring(7),
-      timestamp: new Date().toLocaleTimeString(),
-      level: 'success',
-      message: `اكتمل التزامن: تم تأكيد توافر ${events.length} فعالية نشطة بكافة فئاتها وتفاصيلها.`,
-    });
-  };
-
   // Holding seats directly in Webook Cart
   const handleHoldSeatsOnWebook = async () => {
     if (selectedSeats.length === 0) return;
     setIsHolding(true);
+    setReservationError(null);
 
-    const targetEmail = accounts[0]?.email || '';
+    const activeAccount = accounts[0];
+    const targetEmail = activeAccount?.email || '';
+    const authToken = activeAccount?.authToken;
 
     try {
       const response = await fetch('/api/webook/hold-seats', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
+        },
         body: JSON.stringify({
           eventId: currentEvent.id,
           eventUrl: currentEvent.url,
@@ -276,17 +272,20 @@ export default function App() {
           email: targetEmail || 'user@webook-account',
           date: botConfig.selectedDate,
           tier: botConfig.preferredTier,
+          authToken: authToken || undefined,
         }),
       });
 
-      const data = await response.json();
-      if (data && data.success) {
+      const data = await response.json().catch(() => null);
+      if (response.ok && data && data.success && data.cartId) {
         setCartHoldInfo({
           cartId: data.cartId,
-          expiresAt: data.holdExpiresAt,
+          expiresAt: data.holdExpiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           totalPrice: data.totalPrice,
           active: true,
+          isCustomPayload: Boolean(data.isCustomPayload),
         });
+        setReservationError(null);
 
         handleUpdateLog({
           id: Math.random().toString(36).substring(7),
@@ -295,29 +294,62 @@ export default function App() {
           message: `[WEBOOK CART] ${data.message} (Cart ID: ${data.cartId})`,
         });
       } else {
-        throw new Error('API hold fallback');
+        // Honest error handling - no fake mock cart or misleading success modal!
+        const errMessage = data?.message || `فشلت استجابة API (كود ${response.status}): لم يتم إرجاع سلة صالحة من خادم المنصة`;
+        setCartHoldInfo(null);
+        setReservationError({
+          hasError: true,
+          message: errMessage,
+          endpoint: '/api/webook/hold-seats',
+          timestamp: new Date().toLocaleTimeString(),
+          rawError: data,
+        });
+
+        handleUpdateLog({
+          id: Math.random().toString(36).substring(7),
+          timestamp: new Date().toLocaleTimeString(),
+          level: 'error',
+          message: `[WEBOOK CART] ${errMessage} - تم تفعيل واجهة المعالجة التفاعلية اليدوية.`,
+        });
       }
     } catch (err: any) {
-      // Local fallback hold
-      const cartId = 'wbk_cart_' + Math.random().toString(36).substring(2, 9).toUpperCase();
-      setCartHoldInfo({
-        cartId,
-        expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-        totalPrice: selectedSeats.reduce((acc, s) => acc + s.price, 0),
-        active: true,
+      // Honest network error handling - no fake mock cart or misleading success modal!
+      const errMessage = `تعذر الاتصال بالخادم: ${err.message || 'خطأ غير متوقع في الشبكة'}`;
+      setCartHoldInfo(null);
+      setReservationError({
+        hasError: true,
+        message: errMessage,
+        endpoint: '/api/webook/hold-seats',
+        timestamp: new Date().toLocaleTimeString(),
+        rawError: err,
       });
 
       handleUpdateLog({
         id: Math.random().toString(36).substring(7),
         timestamp: new Date().toLocaleTimeString(),
-        level: 'success',
-        message: targetEmail
-          ? `[WEBOOK CART] تم تثبيت المقاعد بنجاح في سلة Webook للحساب: ${targetEmail}`
-          : `[WEBOOK CART] تم قفل المقاعد بنجاح (يرجى إضافة حسابك في تبويب الحسابات لربطه رسمياً)`,
+        level: 'error',
+        message: `[WEBOOK CART] ${errMessage} - تم تفعيل واجهة المعالجة التفاعلية اليدوية.`,
       });
     } finally {
       setIsHolding(false);
     }
+  };
+
+  const handleApplyCustomReservationPayload = (payload: ReservationFallbackPayload) => {
+    setCartHoldInfo({
+      cartId: payload.cartId || ('CUSTOM_CART_' + Date.now().toString().slice(-6)),
+      expiresAt: payload.holdExpiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      totalPrice: payload.totalPrice ?? selectedSeats.reduce((acc, s) => acc + s.price, 0),
+      active: true,
+      isCustomPayload: true,
+    });
+    setReservationError(null);
+    handleUpdateLog({
+      id: Math.random().toString(36).substring(7),
+      timestamp: new Date().toLocaleTimeString(),
+      level: 'info',
+      message: `[MANUAL TEST PAYLOAD] تم تطبيق حمولة الاستجابة المخصصة يدوياً (${payload.cartId}).`,
+    });
   };
 
   const handleDownloadScript = () => {
@@ -345,6 +377,7 @@ export default function App() {
         onOpenGuide={() => setIsGuideOpen(true)}
         onDownloadScript={handleDownloadScript}
         onInstantAutoBook={() => setIsInstantAutoBookerOpen(true)}
+        onOpenZeroTouch={() => setIsZeroTouchOpen(true)}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         botStatus={isHolding ? 'running' : 'idle'}
@@ -354,21 +387,32 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Live Webook Synchronization Banner */}
-        <LiveWebookSyncBanner
-          status={syncStatus}
-          onForceSync={handleForceSync}
-          selectedEventTitle={currentEvent.titleAr}
-        />
-
         {/* Tab 0: Official Webook Explorer Platform (Default View!) */}
         {activeTab === 'explore' && (
-          <WebookOfficialExplorer
-            events={events}
-            selectedEvent={currentEvent}
-            onSelectEvent={handleSelectEvent}
-            onAddCustomUrl={handleAddCustomUrl}
-          />
+          <div className="space-y-6">
+            <EventSelector
+              events={events}
+              currentEvent={currentEvent}
+              onSelectEvent={handleSelectEvent}
+              config={botConfig}
+              onUpdateConfig={handleUpdateConfig}
+              onSwitchToMapTab={() => setActiveTab('map')}
+              accounts={accounts}
+              onUpdateEvents={(updatedEvents) => {
+                setEvents(updatedEvents);
+                if (updatedEvents.length > 0 && !updatedEvents.some(e => e.id === currentEvent.id)) {
+                  handleSelectEvent(updatedEvents[0]);
+                }
+              }}
+            />
+
+            <WebookOfficialExplorer
+              events={events}
+              selectedEvent={currentEvent}
+              onSelectEvent={handleSelectEvent}
+              onAddCustomUrl={handleAddCustomUrl}
+            />
+          </div>
         )}
 
         {/* Tab 1: Official Interactive Seating Map (مخطط المقاعد الرسمي) */}
@@ -382,6 +426,13 @@ export default function App() {
               config={botConfig}
               onUpdateConfig={handleUpdateConfig}
               onSwitchToMapTab={() => setActiveTab('map')}
+              accounts={accounts}
+              onUpdateEvents={(updatedEvents) => {
+                setEvents(updatedEvents);
+                if (updatedEvents.length > 0 && !updatedEvents.some(e => e.id === currentEvent.id)) {
+                  handleSelectEvent(updatedEvents[0]);
+                }
+              }}
             />
 
             <InteractiveSeatingMap
@@ -394,7 +445,11 @@ export default function App() {
               onHoldSeatsOnWebook={handleHoldSeatsOnWebook}
               isHolding={isHolding}
               cartHoldInfo={cartHoldInfo}
+              reservationError={reservationError}
+              onApplyCustomReservationPayload={handleApplyCustomReservationPayload}
+              onDismissReservationError={() => setReservationError(null)}
               accountEmail={accounts[0]?.email || ''}
+              onUpdateEventTiers={handleUpdateEventTiers}
             />
           </div>
         )}
@@ -473,6 +528,15 @@ export default function App() {
             name: 'حساب Webook الأساسي',
           });
         }}
+      />
+
+      {/* Zero-Touch Auto-Injector Modal (100% Automated without manual intervention) */}
+      <ZeroTouchAutoInjectorModal
+        isOpen={isZeroTouchOpen}
+        onClose={() => setIsZeroTouchOpen(false)}
+        event={currentEvent}
+        selectedSeats={selectedSeats}
+        config={botConfig}
       />
 
       {/* Footer */}

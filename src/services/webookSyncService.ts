@@ -1,330 +1,26 @@
-import { WebookEvent, Seat, SeatingMapData, SeatingSection, TicketTier } from '../types/bot';
+import { WebookEvent, Seat, SeatingMapData, SeatingSection, TicketTier, VenueBlueprintId } from '../types/bot';
 import { REAL_WEBOOK_LIVE_CATALOG } from '../data/realWebookCatalog';
 
-// Helper to resolve the real tier price and name from the official event tiers
-function resolveTierInfo(
-  tiers: TicketTier[] | undefined,
-  role: 'vip' | 'cat1' | 'cat2' | 'cat3' | 'regular',
-  fallbackPrice: number,
-  fallbackNameAr: string
-) {
-  if (!tiers || tiers.length === 0) {
-    return { price: fallbackPrice, nameAr: fallbackNameAr };
-  }
+import {
+  generateVenueSeatingMap,
+  generateStadiumSeatingMap,
+  generateConcertSeatingMap,
+  generateZoneSeatingMap,
+  detectVenueBlueprint,
+  generateVenueSeatingMapByBlueprint,
+} from './venueSeatingService';
 
-  // 1. Direct ID match
-  const exact = tiers.find((t) => t.id.toLowerCase() === role.toLowerCase());
-  if (exact) {
-    return { price: exact.price, nameAr: exact.nameAr || fallbackNameAr };
-  }
+export {
+  generateVenueSeatingMap,
+  generateStadiumSeatingMap,
+  generateConcertSeatingMap,
+  generateZoneSeatingMap,
+  detectVenueBlueprint,
+  generateVenueSeatingMapByBlueprint,
+};
 
-  // 2. Sorted by price from lowest to highest
-  const sorted = [...tiers].sort((a, b) => a.price - b.price);
-  if (role === 'cat3') {
-    // Lowest tier (behind goal / general admission)
-    return { price: sorted[0].price, nameAr: sorted[0].nameAr || fallbackNameAr };
-  }
-  if (role === 'cat2') {
-    // Second lowest tier if exists, or lowest
-    const idx = sorted.length > 2 ? 1 : 0;
-    return { price: sorted[idx].price, nameAr: sorted[idx].nameAr || fallbackNameAr };
-  }
-  if (role === 'vip') {
-    // Highest tier (VIP, Royal, Lounge)
-    const top = sorted[sorted.length - 1];
-    return { price: top.price, nameAr: top.nameAr || fallbackNameAr };
-  }
-  if (role === 'cat1' || role === 'regular') {
-    // Mid tier
-    const midIdx = Math.max(0, Math.floor(sorted.length / 2));
-    return { price: sorted[midIdx].price, nameAr: sorted[midIdx].nameAr || fallbackNameAr };
-  }
+// Curated live Webook events with verified official tiers
 
-  return { price: fallbackPrice, nameAr: fallbackNameAr };
-}
-
-// Seating Map Generator based on venue type with REAL official event prices
-export function generateVenueSeatingMap(
-  type: 'theater' | 'stadium' | 'concert' | 'zone' | 'arena',
-  venueName: string,
-  eventTiers?: TicketTier[]
-): SeatingMapData {
-  if (type === 'stadium') {
-    const vipInfo = resolveTierInfo(eventTiers, 'vip', 1200, 'المنصة الملكية VIP');
-    const cat1Info = resolveTierInfo(eventTiers, 'cat1', 350, 'الدرجة الأولى (الواجهة)');
-    const cat3Info = resolveTierInfo(eventTiers, 'cat3', 125, 'الدرجة الثالثة (خلف المرمى)');
-
-    const seats: Seat[] = [];
-    // West Stand VIP (Royal Lounge)
-    ['W1', 'W2', 'W3'].forEach((row, rIdx) => {
-      for (let num = 1; num <= 16; num++) {
-        const isReserved = num <= 5 || (rIdx === 0 && num % 2 === 0);
-        seats.push({
-          id: `seat-stadium-w-${row}-${num}`,
-          row,
-          number: num,
-          label: `${row}-${num}`,
-          tierId: 'vip',
-          tierNameAr: vipInfo.nameAr,
-          price: vipInfo.price,
-          status: isReserved ? 'reserved' : 'available',
-          section: 'المنصة الغربية VIP',
-          x: num * 24,
-          y: rIdx * 28,
-        });
-      }
-    });
-
-    // East Stand Cat 1
-    ['E1', 'E2', 'E3', 'E4'].forEach((row, rIdx) => {
-      for (let num = 1; num <= 16; num++) {
-        const isReserved = (num + rIdx) % 3 === 0;
-        seats.push({
-          id: `seat-stadium-e-${row}-${num}`,
-          row,
-          number: num,
-          label: `${row}-${num}`,
-          tierId: 'cat1',
-          tierNameAr: cat1Info.nameAr,
-          price: cat1Info.price,
-          status: isReserved ? 'reserved' : 'available',
-          section: 'الواجهة الشرقية',
-          x: num * 24,
-          y: 90 + rIdx * 26,
-        });
-      }
-    });
-
-    // North & South Behind Goal (Cat 3)
-    ['N1', 'N2'].forEach((row, rIdx) => {
-      for (let num = 1; num <= 14; num++) {
-        const isReserved = num > 9;
-        seats.push({
-          id: `seat-stadium-n-${row}-${num}`,
-          row,
-          number: num,
-          label: `${row}-${num}`,
-          tierId: 'cat3',
-          tierNameAr: cat3Info.nameAr,
-          price: cat3Info.price,
-          status: isReserved ? 'reserved' : 'available',
-          section: 'مدرجات خلف المرمى',
-          x: num * 24,
-          y: 200 + rIdx * 26,
-        });
-      }
-    });
-
-    const totalSeats = seats.length;
-    const availableSeats = seats.filter((s) => s.status === 'available').length;
-
-    return {
-      type: 'stadium',
-      stageLabelAr: 'أرضية الملعب (العشب الأخضر - PITCH)',
-      totalSeats,
-      availableSeats,
-      sections: [
-        {
-          id: 'vip-west',
-          nameAr: vipInfo.nameAr,
-          nameEn: 'West Royal Lounge',
-          tierId: 'vip',
-          color: '#f59e0b',
-          capacity: 48,
-          availableCount: seats.filter((s) => s.tierId === 'vip' && s.status === 'available').length,
-          price: vipInfo.price,
-          rows: ['W1', 'W2', 'W3'],
-        },
-        {
-          id: 'cat1-east',
-          nameAr: cat1Info.nameAr,
-          nameEn: 'East Main Stand',
-          tierId: 'cat1',
-          color: '#10b981',
-          capacity: 64,
-          availableCount: seats.filter((s) => s.tierId === 'cat1' && s.status === 'available').length,
-          price: cat1Info.price,
-          rows: ['E1', 'E2', 'E3', 'E4'],
-        },
-        {
-          id: 'cat3-goals',
-          nameAr: cat3Info.nameAr,
-          nameEn: 'Behind Goal Stands',
-          tierId: 'cat3',
-          color: '#3b82f6',
-          capacity: 28,
-          availableCount: seats.filter((s) => s.tierId === 'cat3' && s.status === 'available').length,
-          price: cat3Info.price,
-          rows: ['N1', 'N2'],
-        },
-      ],
-      seats,
-    };
-  }
-
-  if (type === 'concert' || type === 'arena') {
-    const vipInfo = resolveTierInfo(eventTiers, 'vip', 750, 'الدائرة الذهبية VIP');
-    const regInfo = resolveTierInfo(eventTiers, 'regular', 220, 'المقاعد العامة Regular');
-
-    const seats: Seat[] = [];
-    // Front row Golden Circle
-    ['VIP1', 'VIP2', 'VIP3'].forEach((row, rIdx) => {
-      for (let num = 1; num <= 14; num++) {
-        const isReserved = (rIdx === 0 && num % 2 === 0) || num === 7;
-        seats.push({
-          id: `seat-concert-vip-${row}-${num}`,
-          row,
-          number: num,
-          label: `${row}-${num}`,
-          tierId: 'vip',
-          tierNameAr: vipInfo.nameAr,
-          price: vipInfo.price,
-          status: isReserved ? 'reserved' : 'available',
-          section: 'Golden Circle',
-          x: num * 26,
-          y: rIdx * 28,
-        });
-      }
-    });
-
-    // Regular Seated
-    ['A', 'B', 'C', 'D', 'E'].forEach((row, rIdx) => {
-      for (let num = 1; num <= 16; num++) {
-        const isReserved = (num + rIdx) % 4 === 0;
-        seats.push({
-          id: `seat-concert-reg-${row}-${num}`,
-          row,
-          number: num,
-          label: `${row}-${num}`,
-          tierId: 'regular',
-          tierNameAr: regInfo.nameAr,
-          price: regInfo.price,
-          status: isReserved ? 'reserved' : 'available',
-          section: 'General Arena',
-          x: num * 24,
-          y: 110 + rIdx * 26,
-        });
-      }
-    });
-
-    const totalSeats = seats.length;
-    const availableSeats = seats.filter((s) => s.status === 'available').length;
-
-    return {
-      type: 'concert',
-      stageLabelAr: 'مسرح العرض الموسيقي المباشر (LIVE STAGE)',
-      totalSeats,
-      availableSeats,
-      sections: [
-        {
-          id: 'vip-circle',
-          nameAr: vipInfo.nameAr,
-          nameEn: 'Golden Circle Front Stage',
-          tierId: 'vip',
-          color: '#f59e0b',
-          capacity: 42,
-          availableCount: seats.filter((s) => s.tierId === 'vip' && s.status === 'available').length,
-          price: vipInfo.price,
-          rows: ['VIP1', 'VIP2', 'VIP3'],
-        },
-        {
-          id: 'regular-hall',
-          nameAr: regInfo.nameAr,
-          nameEn: 'Main Arena Seating',
-          tierId: 'regular',
-          color: '#8b5cf6',
-          capacity: 80,
-          availableCount: seats.filter((s) => s.tierId === 'regular' && s.status === 'available').length,
-          price: regInfo.price,
-          rows: ['A', 'B', 'C', 'D', 'E'],
-        },
-      ],
-      seats,
-    };
-  }
-
-  // Default: Theater & Zone Layout
-  const vipInfo = resolveTierInfo(eventTiers, 'vip', 150, 'منطقة كبار الشخصيات VIP');
-  const regInfo = resolveTierInfo(eventTiers, 'regular', 85, 'المقاعد العامة Regular');
-
-  const seats: Seat[] = [];
-  ['A', 'B', 'C', 'D'].forEach((row, rIdx) => {
-    for (let num = 1; num <= 14; num++) {
-      const isReserved = (rIdx === 0 && (num === 5 || num === 6 || num === 7)) ||
-                         (rIdx === 1 && (num === 2 || num === 3 || num === 11)) ||
-                         (rIdx === 2 && num % 4 === 0);
-      seats.push({
-        id: `seat-${row}-${num}`,
-        row,
-        number: num,
-        label: `${row}${num}`,
-        tierId: 'vip',
-        tierNameAr: vipInfo.nameAr,
-        price: vipInfo.price,
-        status: isReserved ? 'reserved' : 'available',
-        section: 'VIP Front Stage',
-        x: (num - 1) * 28 + (num > 7 ? 20 : 0),
-        y: rIdx * 28,
-      });
-    }
-  });
-
-  ['E', 'F', 'G', 'H', 'J', 'K'].forEach((row, rIdx) => {
-    for (let num = 1; num <= 18; num++) {
-      const isReserved = (rIdx % 2 === 0 && num % 4 === 0) || (num === 9 || num === 10);
-      seats.push({
-        id: `seat-${row}-${num}`,
-        row,
-        number: num,
-        label: `${row}${num}`,
-        tierId: 'regular',
-        tierNameAr: regInfo.nameAr,
-        price: regInfo.price,
-        status: isReserved ? 'reserved' : 'available',
-        section: 'Main Hall',
-        x: (num - 1) * 24 + (num > 9 ? 16 : 0),
-        y: 130 + rIdx * 26,
-      });
-    }
-  });
-
-  const totalSeats = seats.length;
-  const availableSeats = seats.filter((s) => s.status === 'available').length;
-
-  return {
-    type: 'theater',
-    stageLabelAr: 'خشبة المسرح (THE MAIN STAGE)',
-    totalSeats,
-    availableSeats,
-    sections: [
-      {
-        id: 'vip-section',
-        nameAr: vipInfo.nameAr,
-        nameEn: 'VIP Front Stage',
-        tierId: 'vip',
-        color: '#f59e0b',
-        capacity: 56,
-        availableCount: seats.filter((s) => s.tierId === 'vip' && s.status === 'available').length,
-        price: vipInfo.price,
-        rows: ['A', 'B', 'C', 'D'],
-      },
-      {
-        id: 'reg-section',
-        nameAr: regInfo.nameAr,
-        nameEn: 'Main Orchestra Hall',
-        tierId: 'regular',
-        color: '#8b5cf6',
-        capacity: 108,
-        availableCount: seats.filter((s) => s.tierId === 'regular' && s.status === 'available').length,
-        price: regInfo.price,
-        rows: ['E', 'F', 'G', 'H', 'J', 'K'],
-      },
-    ],
-    seats,
-  };
-}
-
-// Master list of real, active Webook events matching the official platform
 export const LIVE_WEBOOK_CATALOG: WebookEvent[] = [
   {
     id: 'boulevard-world-riyadh',
@@ -835,9 +531,9 @@ class WebookSyncManager {
       const key = e.url || e.slug || e.id;
       if (!seen.has(key)) {
         seen.add(key);
-        // Ensure every seating map has 100% matched official prices to event.tiers
-        const venueType = ((e as any).venueType as any) || (e.category?.includes('رياضة') || e.category?.includes('دوري') ? 'stadium' : e.category?.includes('حفل') ? 'concert' : 'theater');
-        const seatingMap = generateVenueSeatingMap(venueType, e.locationAr || '', e.tiers);
+        // Ensure every seating map matches the exact architectural venue blueprint
+        const blueprint = detectVenueBlueprint(`${e.title || ''} ${e.titleAr || ''} ${e.slug || ''} ${e.id || ''}`, e.locationAr || '', e.category || '');
+        const seatingMap = generateVenueSeatingMap(blueprint, e.locationAr || e.titleAr || '', e.tiers);
         unique.push({
           ...e,
           seatingMap,
@@ -860,7 +556,7 @@ class WebookSyncManager {
 
   constructor() {
     this.status.totalEventsSynced = this.events.length;
-    this.startAutoSync();
+    // Auto-sync is completely stopped as requested by user - only manual user requests run
   }
 
   public getEvents(): WebookEvent[] {
@@ -888,6 +584,59 @@ class WebookSyncManager {
         this.status.lastSyncTimestamp = new Date().toLocaleTimeString('ar-SA');
         this.notify();
       });
+  }
+
+  public async syncEventWithOfficialWebook(slugOrUrl: string): Promise<WebookEvent | null> {
+    try {
+      this.status.isSyncing = true;
+      this.notify();
+
+      let targetSlug = (slugOrUrl || '').trim();
+      const match = targetSlug.match(/events\/([^/?#]+)/) || targetSlug.match(/\/([a-zA-Z0-9_\-]+)$/);
+      if (match) {
+        targetSlug = match[1];
+      }
+      targetSlug = targetSlug.replace(/^https?:\/\/[^/]+\//, '').replace(/\//g, '-').replace(/\/book$/, '');
+
+      const res = await fetch(`/api/webook/sync-event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: targetSlug, url: slugOrUrl }),
+      });
+
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data && data.success && data.event) {
+        const raw = data.event;
+        const blueprint = (raw.venueBlueprint as VenueBlueprintId) || detectVenueBlueprint(`${raw.title || ''} ${raw.slug || ''}`, raw.locationAr || '', raw.category || '');
+        const seatingMap = generateVenueSeatingMapByBlueprint(blueprint, raw.locationAr || raw.titleAr, raw.tiers);
+
+        const updatedEvent: WebookEvent = {
+          ...raw,
+          seatingMap,
+          isHot: true,
+        };
+
+        const existingIdx = this.events.findIndex(e => e.slug === updatedEvent.slug || e.id === updatedEvent.id);
+        if (existingIdx >= 0) {
+          this.events[existingIdx] = updatedEvent;
+        } else {
+          this.events = [updatedEvent, ...this.events];
+        }
+
+        this.status.lastSyncTimestamp = new Date().toLocaleTimeString('ar-SA');
+        this.status.totalEventsSynced = this.events.length;
+        this.notify();
+        return updatedEvent;
+      }
+      return null;
+    } catch (err) {
+      console.error('Failed to sync event with official Webook:', err);
+      return null;
+    } finally {
+      this.status.isSyncing = false;
+      this.notify();
+    }
   }
 
   public subscribe(callback: (events: WebookEvent[], status: WebookSyncStatus) => void): () => void {
@@ -948,7 +697,7 @@ class WebookSyncManager {
           color: '#f59e0b',
         },
       ],
-      seatingMap: generateVenueSeatingMap('theater', cleanSlug, [
+      seatingMap: generateVenueSeatingMap(detectVenueBlueprint(cleanSlug, '', ''), cleanSlug, [
         {
           id: 'regular',
           name: 'Regular',
@@ -980,17 +729,6 @@ class WebookSyncManager {
 
   private notify() {
     this.listeners.forEach((cb) => cb(this.events, this.status));
-  }
-
-  private startAutoSync() {
-    this.syncTimer = setInterval(() => {
-      this.status.isSyncing = true;
-      this.status.lastSyncTimestamp = new Date().toLocaleTimeString('ar-SA');
-      setTimeout(() => {
-        this.status.isSyncing = false;
-        this.notify();
-      }, 800);
-    }, 30000);
   }
 }
 

@@ -6,7 +6,7 @@ import {
   Gauge, Laptop, Copy, CheckCheck, Zap, Smartphone
 } from 'lucide-react';
 import { Account, BotConfig, BotLog, BotStep, WebookEvent, Seat } from '../types/bot';
-import { getWebookBookingUrl, getWebookEventUrl, WEBOOK_MY_BOOKINGS_URL, getBrowserInstantBookerScript } from '../utils/webookUrls';
+import { getWebookBookingUrl, getWebookEventUrl, WEBOOK_MY_BOOKINGS_URL, getBrowserInstantBookerScript, generateOfficialCartInjectionScript } from '../utils/webookUrls';
 import { InstantAutoBookerModal } from './InstantAutoBookerModal';
 
 interface LiveBotRunnerProps {
@@ -796,7 +796,7 @@ export const LiveBotRunner: React.FC<LiveBotRunnerProps> = ({
                   {/* Copy 1-Click Fast Browser Auto-Booker Snippet */}
                   <button
                     onClick={() => {
-                      const script = getBrowserInstantBookerScript(config.ticketQuantity || 2);
+                      const script = generateOfficialCartInjectionScript(event, selectedSeats, config.ticketQuantity || 2);
                       navigator.clipboard.writeText(script);
                       setCopiedSnippet(true);
                       setTimeout(() => setCopiedSnippet(false), 3000);
@@ -806,12 +806,12 @@ export const LiveBotRunner: React.FC<LiveBotRunnerProps> = ({
                     {copiedSnippet ? (
                       <>
                         <CheckCheck className="w-4 h-4 text-emerald-400" />
-                        <span className="text-emerald-300 font-bold">تم نسخ كود الأتمتة الفوري للمتصفح!</span>
+                        <span className="text-emerald-300 font-bold">تم نسخ كود تثبيت المقاعد في Webook!</span>
                       </>
                     ) : (
                       <>
                         <Sparkles className="w-4 h-4 text-amber-400" />
-                        <span>نسخ كود الأتمتة الفوري للمتصفح (1-Click Auto-Booker)</span>
+                        <span>نسخ كود حاقن السلة لـ Webook (تثبيت المقاعد فوراً)</span>
                       </>
                     )}
                   </button>

@@ -2,14 +2,17 @@ import React, { useState, useEffect } from 'react';
 import { 
   X, Sparkles, CheckCheck, ExternalLink, Zap, 
   ShieldCheck, CreditCard, Clock, Check, Ticket, AlertCircle,
-  Mail, UserPlus, Users
+  Mail, UserPlus, Users, Copy, AlertTriangle
 } from 'lucide-react';
-import { WebookEvent, Account } from '../types/bot';
+import { WebookEvent, Account, ReservationErrorState, ReservationFallbackPayload } from '../types/bot';
 import { 
   getWebookBookingUrl, 
-  WEBOOK_MY_BOOKINGS_URL 
+  getWebookDirectCheckoutUrl,
+  WEBOOK_MY_BOOKINGS_URL,
+  generateOfficialCartInjectionScript
 } from '../utils/webookUrls';
 import { playReservationChime } from '../utils/audioAlert';
+import { ReservationFallbackCard } from './ReservationFallbackCard';
 
 interface InstantAutoBookerModalProps {
   isOpen: boolean;
@@ -40,6 +43,9 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
   const [isReserved, setIsReserved] = useState<boolean>(false);
   const [cartId, setCartId] = useState<string>('');
   const [emailError, setEmailError] = useState<string>('');
+  const [copiedInjector, setCopiedInjector] = useState<boolean>(false);
+  const [apiError, setApiError] = useState<ReservationErrorState | null>(null);
+  const [isCustomTestPayload, setIsCustomTestPayload] = useState<boolean>(false);
 
   useEffect(() => {
     if (userEmail) {
@@ -54,12 +60,24 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
   const directBookingUrl = getWebookBookingUrl(event);
   const effectiveEmail = selectedEmail || manualEmail.trim();
 
+  // Find matching account to get auth token
+  const matchedAccount = accounts.find((a) => a.email === effectiveEmail) || accounts[0];
+  const effectiveAuthToken = matchedAccount?.authToken;
+
+  const handleCopyInjector = () => {
+    const script = generateOfficialCartInjectionScript(event, [], ticketQuantity || 2);
+    navigator.clipboard.writeText(script);
+    setCopiedInjector(true);
+    setTimeout(() => setCopiedInjector(false), 3000);
+  };
+
   const handleExecuteFullAutoBooking = async () => {
     if (!effectiveEmail) {
       setEmailError('يرجى كتابة بريد حسابك في Webook أو اختياره من القائمة للمتابعة');
       return;
     }
     setEmailError('');
+    setApiError(null);
 
     if (manualEmail.trim() && onSaveAccount) {
       onSaveAccount(manualEmail.trim());
@@ -72,33 +90,63 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
       // Call backend to lock seats and generate authenticated cart hold
       const res = await fetch('/api/webook/hold-seats', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(effectiveAuthToken ? { 'Authorization': `Bearer ${effectiveAuthToken}` } : {})
+        },
         body: JSON.stringify({
           eventId: event.id,
           eventUrl: directBookingUrl,
-          seats: [{ id: 'auto_1', label: 'المقعد 1' }, { id: 'auto_2', label: 'المقعد 2' }].slice(0, ticketQuantity || 2),
+          seats: [{ id: 'auto_1', label: 'المقعد 1', price: event.tiers[0]?.price || 85 }, { id: 'auto_2', label: 'المقعد 2', price: event.tiers[0]?.price || 85 }].slice(0, ticketQuantity || 2),
           email: effectiveEmail,
+          authToken: effectiveAuthToken,
         }),
       });
 
-      const data = await res.json();
-      if (data && data.cartId) {
+      const data = await res.json().catch(() => null);
+      if (res.ok && data && data.success && data.cartId) {
         setCartId(data.cartId);
+        setIsReserved(true);
+        setIsCustomTestPayload(Boolean(data.isCustomPayload));
+        setApiError(null);
+        // Automatically open the verified event booking checkout screen directly
+        window.open(directBookingUrl, '_blank', 'noopener,noreferrer');
       } else {
-        setCartId('WBK_CART_' + Math.random().toString(36).substring(2, 8).toUpperCase());
+        // Honest error handling - no fake confirmation modal!
+        setIsReserved(false);
+        const errMessage = data?.message || `فشل طلب الحجز من الخادم (كود الاستجابة: ${res.status}): لم يتم إرجاع سلة صالحة.`;
+        setApiError({
+          hasError: true,
+          message: errMessage,
+          endpoint: '/api/webook/hold-seats',
+          timestamp: new Date().toLocaleTimeString(),
+          rawError: data,
+        });
       }
-    } catch (e) {
-      setCartId('WBK_CART_' + Math.random().toString(36).substring(2, 8).toUpperCase());
+    } catch (e: any) {
+      // Honest network error handling - no fake confirmation modal!
+      setIsReserved(false);
+      setApiError({
+        hasError: true,
+        message: `تعذر الاتصال بخادم الحجز: ${e.message || 'خطأ في الشبكة'}`,
+        endpoint: '/api/webook/hold-seats',
+        timestamp: new Date().toLocaleTimeString(),
+        rawError: e,
+      });
     } finally {
       setIsProcessing(false);
-      setIsReserved(true);
-      // Automatically open the verified event booking checkout screen directly
-      window.open(directBookingUrl, '_blank', 'noopener,noreferrer');
     }
   };
 
+  const handleApplyCustomPayload = (payload: ReservationFallbackPayload) => {
+    setCartId(payload.cartId || ('CUSTOM_TEST_' + Date.now().toString().slice(-6)));
+    setIsReserved(true);
+    setIsCustomTestPayload(true);
+    setApiError(null);
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in" dir="rtl">
       <div 
         className="bg-[#0e1322] border-2 border-emerald-500/40 rounded-3xl w-full max-w-xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden relative"
         onClick={(e) => e.stopPropagation()}
@@ -155,7 +203,7 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
             </div>
           </div>
 
-          {/* Account Selection / Manual Email Input (User has full control) */}
+          {/* Account Selection / Manual Email Input */}
           <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold text-white flex items-center gap-2">
@@ -186,7 +234,7 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
                 >
                   {accounts.map((acc) => (
                     <option key={acc.id} value={acc.email}>
-                      {acc.email} {acc.name ? `(${acc.name})` : ''}
+                      {acc.email} {acc.name ? `(${acc.name})` : ''} {acc.authToken ? '• [توكن موثق ✓]' : ''}
                     </option>
                   ))}
                   <option value="">+ كتابة بريد إلكتروني آخر يدويًا...</option>
@@ -220,7 +268,7 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
                   dir="ltr"
                 />
                 <p className="text-[11px] text-slate-400">
-                  لا يوجد حساب مسجل مسبقاً بناءً على اختيارك. أدخل بريدك هنا، أو أضف حسابك بكلمة المرور من تبويب "الحسابات".
+                  لا يوجد حساب مسجل مسبقاً. أدخل بريدك هنا، أو أضف حسابك بكلمة المرور من تبويب "الحسابات".
                 </p>
               </div>
             )}
@@ -233,54 +281,114 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
             )}
           </div>
 
+          {/* Real API Failure Interactive Fallback UI (Ensures no misleading mock confirmation modals!) */}
+          {apiError && (
+            <ReservationFallbackCard
+              errorState={apiError}
+              onApplyCustomPayload={handleApplyCustomPayload}
+              onRetry={handleExecuteFullAutoBooking}
+              onDismiss={() => setApiError(null)}
+              defaultTotalPrice={(event.tiers[0]?.price || 75) * (ticketQuantity || 2)}
+              selectedSeatsCount={ticketQuantity || 2}
+            />
+          )}
+
           {/* Automated Zero-Touch Status Card */}
-          <div className="bg-emerald-950/20 border border-emerald-500/30 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-emerald-300 font-bold text-xs">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>نظام الأتمتة المباشرة السحابي 100%:</span>
+          {!apiError && (
+            <div className="bg-emerald-950/20 border border-emerald-500/30 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-emerald-300 font-bold text-xs">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>نظام الأتمتة المباشرة السحابي 100%:</span>
+                </div>
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">
+                  جاهز تماماً
+                </span>
               </div>
-              <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">
-                جاهز تماماً
-              </span>
+
+              <div className="space-y-2 text-xs">
+                <div className="flex items-center gap-2 text-slate-200">
+                  <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-bold">
+                    ✓
+                  </div>
+                  <span>فحص توافر التذاكر بأفضل فئة سعرية بشكل تلقائي</span>
+                </div>
+
+                <div className="flex items-center gap-2 text-slate-200">
+                  <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-bold">
+                    ✓
+                  </div>
+                  <span>قفل التذاكر في سلتك الرسمية لمدة مهلة السداد (10 دقائق)</span>
+                </div>
+
+                <div className="flex items-center gap-2 text-slate-200">
+                  <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-bold">
+                    ✓
+                  </div>
+                  <span>الانتقال المباشر لشاشة الدفع بـ Apple Pay أو مدى دون أي تصفح يدوي</span>
+                </div>
+              </div>
             </div>
-
-            <div className="space-y-2 text-xs">
-              <div className="flex items-center gap-2 text-slate-200">
-                <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-bold">
-                  ✓
-                </div>
-                <span>فحص توافر التذاكر بأفضل فئة سعرية بشكل تلقائي</span>
-              </div>
-
-              <div className="flex items-center gap-2 text-slate-200">
-                <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-bold">
-                  ✓
-                </div>
-                <span>قفل التذاكر في سلتك الرسمية لمدة مهلة السداد (10 دقائق)</span>
-              </div>
-
-              <div className="flex items-center gap-2 text-slate-200">
-                <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-bold">
-                  ✓
-                </div>
-                <span>الانتقال المباشر لشاشة الدفع بـ Apple Pay أو مدى دون أي تصفح يدوي</span>
-              </div>
-            </div>
-          </div>
+          )}
 
           {/* If already reserved */}
-          {isReserved && (
-            <div className="bg-emerald-900/30 border border-emerald-500/50 rounded-2xl p-4 text-center space-y-2 animate-in zoom-in-95">
-              <div className="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 mx-auto flex items-center justify-center">
-                <CheckCheck className="w-6 h-6" />
+          {isReserved && !apiError && (
+            <div className="bg-emerald-950/50 border border-emerald-500/60 rounded-2xl p-4 text-right space-y-3 animate-in zoom-in-95">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm">
+                  <CheckCheck className="w-5 h-5 text-emerald-400 shrink-0" />
+                  <span>تم تجهيز الحجز بنجاح!</span>
+                </div>
+                {isCustomTestPayload && (
+                  <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full font-bold">
+                    حمولة اختبار مخصصة
+                  </span>
+                )}
               </div>
-              <h4 className="text-sm font-black text-emerald-300">
-                تم تنفيذ الحجز ونقلك لشاشة السداد بنجاح!
-              </h4>
-              <p className="text-xs text-slate-300">
-                المقاعد محجوزة الآن باسمك (Cart ID: {cartId}) لمدة 10 دقائق لإدخال بطاقتك البنكية بأمان.
+
+              <p className="text-xs text-slate-300 leading-relaxed">
+                رقم السلة: <code className="bg-slate-950 px-1.5 py-0.5 rounded text-emerald-400 font-mono font-bold">{cartId}</code>
               </p>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleCopyInjector}
+                  className="px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs rounded-xl shadow-md transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  {copiedInjector ? (
+                    <>
+                      <CheckCheck className="w-4 h-4" />
+                      <span>تم نسخ كود تثبيت السلة!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      <span>نسخ كود تثبيت المقاعد في Webook</span>
+                    </>
+                  )}
+                </button>
+
+                <a
+                  href={getWebookDirectCheckoutUrl()}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-4 py-2 bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 text-xs font-black rounded-xl shadow-md transition flex items-center gap-1.5"
+                >
+                  <span>💳 شاشة الدفع (/checkout)</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+
+                <a
+                  href={directBookingUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-1.5"
+                >
+                  <span>⚡ مسار حجز التذاكر (/book)</span>
+                  <ExternalLink className="w-3 h-3 text-slate-300" />
+                </a>
+              </div>
             </div>
           )}
 
@@ -289,12 +397,12 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
             <button
               onClick={handleExecuteFullAutoBooking}
               disabled={isProcessing}
-              className="w-full py-4 px-6 bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-500 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-sm rounded-2xl shadow-xl shadow-emerald-500/30 transition-all flex items-center justify-center gap-2 cursor-pointer transform hover:scale-[1.01] active:scale-[0.99]"
+              className="w-full py-4 px-6 bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-500 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-sm rounded-2xl shadow-xl shadow-emerald-500/30 transition-all flex items-center justify-center gap-2 cursor-pointer transform hover:scale-[1.01] active:scale-[0.99] disabled:opacity-50"
             >
               {isProcessing ? (
                 <>
                   <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
-                  <span>جاري حجز المقاعد ونقلك لشاشة الدفع...</span>
+                  <span>جاري إرسال طلب الحجز للخادم...</span>
                 </>
               ) : isReserved ? (
                 <>

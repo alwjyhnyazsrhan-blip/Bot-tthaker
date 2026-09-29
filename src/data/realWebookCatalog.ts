@@ -1,7 +1,7 @@
 // 100% Real Live Catalog Extracted Directly from Official Webook.com Sitemaps
 // Total active events and experiences: 439
 import { WebookEvent } from '../types/bot';
-import { generateVenueSeatingMap } from '../services/webookSyncService';
+import { generateVenueSeatingMap } from '../services/venueSeatingService';
 
 export const REAL_WEBOOK_LIVE_CATALOG: WebookEvent[] = [
   {

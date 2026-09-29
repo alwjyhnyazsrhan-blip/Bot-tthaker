@@ -8,6 +8,7 @@ interface HeaderProps {
   onOpenGuide: () => void;
   onDownloadScript: () => void;
   onInstantAutoBook?: () => void;
+  onOpenZeroTouch?: () => void;
   activeTab: 'explore' | 'map' | 'runner' | 'code' | 'accounts' | 'settings';
   setActiveTab: (tab: 'explore' | 'map' | 'runner' | 'code' | 'accounts' | 'settings') => void;
   botStatus: 'idle' | 'running' | 'success' | 'failed';
@@ -19,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenGuide,
   onDownloadScript,
   onInstantAutoBook,
+  onOpenZeroTouch,
   activeTab,
   setActiveTab,
   botStatus,
@@ -49,9 +51,9 @@ export const Header: React.FC<HeaderProps> = ({
                 <h1 className="text-base sm:text-lg font-black text-white tracking-wide">
                   Webook Auto-Seat Sniper
                 </h1>
-                <span className="px-2 py-0.5 text-[10px] sm:text-[11px] font-bold bg-[#ff007a]/20 text-[#ff007a] border border-[#ff007a]/40 rounded-full flex items-center gap-1">
+                <span className="px-2 py-0.5 text-[10px] sm:text-[11px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 rounded-full flex items-center gap-1">
                   <Sparkles className="w-3 h-3" />
-                  Live Webook Sync
+                  Webook Official Platform
                 </span>
               </div>
               <p className="text-xs text-slate-400 hidden sm:block">
@@ -159,6 +161,17 @@ export const Header: React.FC<HeaderProps> = ({
             >
               دليل الاستخدام
             </button>
+
+            {onOpenZeroTouch && (
+              <button
+                onClick={onOpenZeroTouch}
+                className="hidden sm:flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-black text-white bg-gradient-to-r from-purple-600 via-pink-600 to-indigo-600 hover:from-purple-500 hover:to-pink-500 rounded-lg shadow-md shadow-purple-600/30 transition cursor-pointer animate-pulse"
+                title="الحقن التلقائي دون أي تدخل يدوي منك"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                <span>⚡ الحقن التلقائي دون تدخل</span>
+              </button>
+            )}
 
             <button
               onClick={onInstantAutoBook || onDownloadScript}
