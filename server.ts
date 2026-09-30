@@ -139,6 +139,139 @@ async function startServer() {
     }
   });
 
+  // Helper interfaces for Webook ticketing & perks API schemas
+  interface WebookTicketPayloadItem {
+    id: string;
+    ticket_id: string;
+    event_ticket_id: string;
+    qty: number;
+    quantity: number;
+    price?: number;
+    seat_id?: string;
+    seatAndName?: string;
+    row?: string;
+    seat_number?: string | number;
+  }
+
+  interface WebookPerkPayloadItem {
+    id: string;
+    perk_id: string;
+    title?: string;
+    tickets: Array<{
+      id: string;
+      ticket_id?: string;
+      qty: number;
+      quantity?: number;
+    }>;
+  }
+
+  function buildWebookTickets(
+    incomingTickets: any,
+    incomingSeats: any,
+    defaultTicketId: string,
+    quantity: number,
+    unitPrice: number
+  ): WebookTicketPayloadItem[] {
+    if (Array.isArray(incomingTickets) && incomingTickets.length > 0) {
+      return incomingTickets.map((t: any, idx: number) => {
+        const tid = String(t.id || t.ticket_id || t.event_ticket_id || defaultTicketId || `ticket-${idx + 1}`);
+        const q = Math.max(1, Number(t.qty || t.quantity) || 1);
+        return {
+          id: tid,
+          ticket_id: tid,
+          event_ticket_id: tid,
+          qty: q,
+          quantity: q,
+          price: Number(t.price) || unitPrice || 85,
+          seat_id: t.seat_id || t.seatId || (incomingSeats && incomingSeats[idx]?.id) || undefined,
+          seatAndName: t.seatAndName || t.label || (incomingSeats && incomingSeats[idx]?.label) || undefined,
+          row: t.row || (incomingSeats && incomingSeats[idx]?.row) || undefined,
+          seat_number: t.seat_number || (incomingSeats && incomingSeats[idx]?.number) || undefined,
+        };
+      });
+    }
+
+    const seats = Array.isArray(incomingSeats) && incomingSeats.length > 0 ? incomingSeats : [];
+    if (seats.length > 0) {
+      return seats.map((s: any, idx: number) => {
+        const tid = String(s.tierId || s.ticket_id || s.ticketId || defaultTicketId || `ticket-${idx + 1}`);
+        const seatLabel = s.label || `${s.row || 'A'}-${s.number || idx + 1}`;
+        const seatId = String(s.id || `seat-${s.row || 'A'}-${s.number || idx + 1}`);
+        return {
+          id: tid,
+          ticket_id: tid,
+          event_ticket_id: tid,
+          qty: 1,
+          quantity: 1,
+          price: Number(s.price) || unitPrice || 85,
+          seat_id: seatId,
+          seatAndName: seatLabel,
+          row: String(s.row || 'A'),
+          seat_number: s.number || (idx + 1),
+        };
+      });
+    }
+
+    const cleanTicketId = String(defaultTicketId || 'regular');
+    const qty = Math.max(1, Number(quantity) || 1);
+    return [
+      {
+        id: cleanTicketId,
+        ticket_id: cleanTicketId,
+        event_ticket_id: cleanTicketId,
+        qty,
+        quantity: qty,
+        price: unitPrice || 120,
+      }
+    ];
+  }
+
+  function buildWebookPerks(
+    incomingPerks: any,
+    tickets: WebookTicketPayloadItem[]
+  ): WebookPerkPayloadItem[] {
+    if (Array.isArray(incomingPerks) && incomingPerks.length > 0) {
+      return incomingPerks.map((p: any, idx: number) => {
+        const pid = String(p.id || p.perk_id || p._id || `perk_standard_${idx + 1}`);
+        const perkTickets = Array.isArray(p.tickets) && p.tickets.length > 0
+          ? p.tickets.map((t: any) => ({
+              id: String(t.id || t.ticket_id || tickets[0]?.id || 'ticket-1'),
+              ticket_id: String(t.ticket_id || t.id || tickets[0]?.ticket_id || 'ticket-1'),
+              qty: Math.max(1, Number(t.qty || t.quantity) || 1),
+              quantity: Math.max(1, Number(t.quantity || t.qty) || 1),
+            }))
+          : tickets.map((t) => ({
+              id: t.id,
+              ticket_id: t.ticket_id,
+              qty: t.qty,
+              quantity: t.quantity,
+            }));
+
+        return {
+          id: pid,
+          perk_id: pid,
+          title: p.title || 'Standard Entry Perk',
+          tickets: perkTickets,
+        };
+      });
+    }
+
+    const defaultPerkId = 'perk_standard';
+    return [
+      {
+        id: defaultPerkId,
+        perk_id: defaultPerkId,
+        title: 'Standard Entry Perk',
+        tickets: tickets.map((t) => ({
+          id: t.id,
+          ticket_id: t.ticket_id,
+          qty: t.qty,
+          quantity: t.quantity,
+        })),
+      }
+    ];
+  }
+
   // API endpoint: Real POST request to add selected tickets/seats to Webook cart
   app.post(['/api/webook/cart/add', '/api/webook/hold-seats'], async (req, res) => {
     const { 
@@ -147,6 +280,7 @@ async function startServer() {
       slug, 
       seats, 
       tickets,
+      perks,
       quantity,
       selectedDate, 
       date,
@@ -184,6 +318,8 @@ async function startServer() {
           slug: cleanSlug,
           seatIds: seats ? seats.map((s: any) => s.id) : [],
           seats: seats || [],
+          tickets: parsed.tickets || [],
+          perks: parsed.perks || [],
           quantity: seats ? seats.length : 1,
           totalPrice,
           currency: 'SAR',
@@ -235,9 +371,29 @@ async function startServer() {
     const effectiveToken = authToken || req.headers.authorization?.replace(/^Bearer\s+/i, '').trim() || sessionToken;
     const effectiveTicketId = req.body.ticket_id || req.body.ticketId || req.body.event_ticket_id || (tickets && tickets[0]?.id) || (effectiveSeats[0]?.tierId) || 'regular';
 
+    // Calculate total price based on selected seats or ticket tiers
+    const totalPrice = effectiveSeats.length > 0
+      ? effectiveSeats.reduce((sum: number, s: any) => sum + (Number(s.price) || 85), 0)
+      : (effectiveQty * 120);
+
     const seatLabels = effectiveSeats.length > 0 
       ? effectiveSeats.map((s: any) => s.label || `${s.row || 'R'}-${s.number || '1'}`).join(', ')
       : `${effectiveQty} تذاكر (${effectiveTicketId})`;
+
+    // Build the non-empty "tickets" array adhering strictly to Webook's API schema
+    const builtTickets = buildWebookTickets(
+      tickets || req.body.tickets,
+      effectiveSeats,
+      effectiveTicketId,
+      effectiveQty,
+      effectiveSeats.length > 0 ? (totalPrice / effectiveSeats.length) : 120
+    );
+
+    // Build the non-empty "perks" array adhering strictly to Webook's API schema
+    const builtPerks = buildWebookPerks(
+      perks || req.body.perks,
+      builtTickets
+    );
 
     console.log(`[WEBOOK REAL CART API] POST /cart/add-to-cart for event: ${effectiveSlug}, qty: ${effectiveQty}, seats: ${seatLabels}, token present: ${Boolean(effectiveToken)}`);
 
@@ -259,23 +415,36 @@ async function startServer() {
         realApiHeaders['Authorization'] = `Bearer ${effectiveToken}`;
       }
 
-      // Webook API expects ticket_id as well as event_ticket_id (avoids PHP 500 "Undefined array key ticket_id")
+      // Webook API expects non-empty tickets and perks arrays along with event_ticket_id
       const realApiPayload = {
         parent_event_id: effectiveSlug,
+        event_id: effectiveSlug,
         type: 'ticket',
         ticket_id: effectiveTicketId,
         event_ticket_id: effectiveTicketId,
-        ticket_ids: [effectiveTicketId],
-        tickets: [{ ticket_id: effectiveTicketId, id: effectiveTicketId, quantity: effectiveQty }],
+        ticket_ids: builtTickets.map((t) => t.id),
+        tickets: builtTickets,
+        perks: builtPerks,
+        perk_ids: builtPerks.map((p) => p.id),
         quantity: effectiveQty,
         time_slot_date: effectiveDate,
         time_slot: effectiveTime,
         app_source: 'web',
         lang: 'ar',
+        order: {
+          parent_event_id: effectiveSlug,
+          event_id: effectiveSlug,
+          tickets: builtTickets,
+          perks: builtPerks,
+          lang: 'ar',
+          app_source: 'web',
+        },
         metadata: {
           selectedSeats: JSON.stringify(effectiveSeats),
           team: selectedTeam || undefined,
           subEvent: selectedSubEvent?.titleAr || selectedSubEvent?.title || undefined,
+          tickets: builtTickets,
+          perks: builtPerks,
         }
       };
 
@@ -310,33 +479,12 @@ async function startServer() {
     }
 
     // Capture official payment gateway redirect URL or payment page URL directly from the API response
-    const apiCapturedRedirectUrl = 
-      webookResponseJson?.data?.payment_url ||
-      webookResponseJson?.data?.redirect_url ||
-      webookResponseJson?.data?.payment_page_url ||
-      webookResponseJson?.data?.paytabs_url ||
-      webookResponseJson?.data?.paymentGatewayUrl ||
-      webookResponseJson?.data?.url ||
-      webookResponseJson?.data?.checkout_url ||
-      webookResponseJson?.data?.payment_gateway?.redirect_url ||
-      webookResponseJson?.data?.payment?.redirect_url ||
-      webookResponseJson?.data?.payment?.url ||
-      webookResponseJson?.payment_url ||
-      webookResponseJson?.redirect_url ||
-      webookResponseJson?.payment_page_url ||
-      webookResponseJson?.paymentGatewayUrl ||
-      webookResponseJson?.paytabs_url ||
-      webookResponseJson?.url;
+    const apiCapturedRedirectUrl = extractWebookPaymentUrl(webookResponseJson);
 
     // Allocate verified active cart ID (using platform cart ID if returned, or canonical active prefix)
     const cartId = realCartId || ('wbk_cart_' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase());
     const orderReference = req.body.orderReference || ('WBK-ORD-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(100 + Math.random() * 900));
     const holdExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-
-    // Calculate total price based on selected seats or ticket tiers
-    const totalPrice = effectiveSeats.length > 0
-      ? effectiveSeats.reduce((sum: number, s: any) => sum + (Number(s.price) || 85), 0)
-      : (effectiveQty * 120);
 
     const seatIds = req.body.seatIds || effectiveSeats.map((s: any) => s.id || `seat-${s.row || 'A'}-${s.number || 1}`);
 
@@ -379,6 +527,8 @@ async function startServer() {
       slug: effectiveSlug,
       seatIds,
       seats: effectiveSeats,
+      tickets: builtTickets,
+      perks: builtPerks,
       quantity: effectiveQty,
       totalPrice,
       currency: 'SAR',
@@ -517,6 +667,20 @@ async function startServer() {
       json?.data?.paytabs_url,
       json?.data?.paytabsRedirectUrl,
       json?.data?.checkout_url,
+      json?.data?.payment_session?.redirect_url,
+      json?.data?.payment_session?.url,
+      json?.data?.payment_session?.payment_url,
+      json?.data?.payment_session,
+      json?.data?.paymentSession?.redirect_url,
+      json?.data?.paymentSession?.url,
+      json?.data?.paymentSession?.payment_url,
+      json?.data?.paymentSession,
+      json?.payment_session?.redirect_url,
+      json?.payment_session?.url,
+      json?.payment_session,
+      json?.paymentSession?.redirect_url,
+      json?.paymentSession?.url,
+      json?.paymentSession,
       json?.data?.payment?.url,
       json?.data?.payment?.redirect_url,
       json?.data?.payment?.payment_url,
@@ -534,23 +698,48 @@ async function startServer() {
       json?.payment?.url,
       json?.payment?.redirect_url,
       json?.url,
+      json?.data?.redirect,
+      json?.redirect,
+      json?.data?.secure_url,
+      json?.secure_url,
+      json?.data?.gateway_url,
+      json?.gateway_url,
+      json?.data?.paytabs?.redirect_url,
+      json?.paytabs?.redirect_url,
+      json?.paytabs?.url,
     ];
 
     for (const c of candidates) {
       if (typeof c === 'string' && c.trim().startsWith('http') && !c.includes('PTSESS_')) {
         return c.trim();
       }
-    }
-
-    if (json?.data && typeof json.data === 'object') {
-      for (const k of Object.keys(json.data)) {
-        const val = json.data[k];
-        if (typeof val === 'string' && val.startsWith('https://') && !val.includes('PTSESS_')) {
-          if (val.includes('paytabs') || val.includes('payment') || val.includes('checkout')) {
-            return val.trim();
-          }
+      if (c && typeof c === 'object') {
+        const nestedUrl = c.redirect_url || c.url || c.payment_url || c.payment_page_url;
+        if (typeof nestedUrl === 'string' && nestedUrl.trim().startsWith('http') && !nestedUrl.includes('PTSESS_')) {
+          return nestedUrl.trim();
         }
       }
+    }
+
+    if (json && typeof json === 'object') {
+      const searchObj = (obj: any, depth = 0): string | null => {
+        if (!obj || depth > 5) return null;
+        if (typeof obj === 'string') {
+          if (obj.startsWith('http') && (obj.includes('paytabs') || obj.includes('secure-webook') || obj.includes('/payment/') || obj.includes('/checkout/paytabs'))) {
+            return obj.trim();
+          }
+          return null;
+        }
+        if (typeof obj === 'object') {
+          for (const key of Object.keys(obj)) {
+            const res = searchObj(obj[key], depth + 1);
+            if (res) return res;
+          }
+        }
+        return null;
+      };
+      const found = searchObj(json);
+      if (found) return found;
     }
 
     return null;
@@ -567,6 +756,8 @@ async function startServer() {
         eventSlug, 
         totalPrice, 
         seats, 
+        tickets,
+        perks,
         email, 
         sessionToken, 
         authToken,
@@ -605,6 +796,52 @@ async function startServer() {
         });
       }
 
+      // Extract seats, tickets, and perks from request or active hold
+      const effectiveSeats = (Array.isArray(seats) && seats.length > 0)
+        ? seats
+        : (Array.isArray(hold?.seats) && hold.seats.length > 0)
+          ? hold.seats
+          : [];
+
+      const effectiveIncomingTickets = (Array.isArray(tickets) && tickets.length > 0)
+        ? tickets
+        : (Array.isArray(hold?.tickets) && hold.tickets.length > 0)
+          ? hold.tickets
+          : undefined;
+
+      const effectiveIncomingPerks = (Array.isArray(perks) && perks.length > 0)
+        ? perks
+        : (Array.isArray(hold?.perks) && hold.perks.length > 0)
+          ? hold.perks
+          : undefined;
+
+      const effectiveTicketId =
+        req.body.ticket_id ||
+        req.body.ticketId ||
+        req.body.event_ticket_id ||
+        (effectiveIncomingTickets && effectiveIncomingTickets[0]?.id) ||
+        (effectiveSeats[0]?.tierId) ||
+        'regular';
+
+      const effectiveQty = effectiveSeats.length > 0
+        ? effectiveSeats.length
+        : (Number(req.body.quantity) || hold?.quantity || 1);
+
+      // Build guaranteed non-empty "tickets" array conforming to Webook API schema
+      const builtTickets = buildWebookTickets(
+        effectiveIncomingTickets,
+        effectiveSeats,
+        effectiveTicketId,
+        effectiveQty,
+        effectiveAmount / (effectiveQty || 1)
+      );
+
+      // Build guaranteed non-empty "perks" array conforming to Webook API schema
+      const builtPerks = buildWebookPerks(
+        effectiveIncomingPerks,
+        builtTickets
+      );
+
       // Forward checkout/cart request directly to Webook's official payment initiation endpoint using user's Bearer Token
       const upstreamHeaders: Record<string, string> = {
         'token': WEBOOK_PUBLIC_API_TOKEN,
@@ -629,18 +866,52 @@ async function startServer() {
         payment_method: 'paytabs',
         payment_gateway: 'paytabs',
         gateway: 'paytabs',
+        tickets: builtTickets,
+        ticket_ids: builtTickets.map((t) => t.id),
+        ticket_id: effectiveTicketId,
+        event_ticket_id: effectiveTicketId,
+        perks: builtPerks,
+        perk_ids: builtPerks.map((p) => p.id),
+        quantity: effectiveQty,
         app_source: 'web',
         lang: 'ar',
+        redirect: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}`,
+        redirect_failed: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}&failed=1`,
         return_url: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}`,
         callback_url: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}`,
+        selectedSeats: effectiveSeats.length > 0 ? JSON.stringify(effectiveSeats) : undefined,
+        seats: effectiveSeats,
+        seatIds: effectiveSeats.map((s: any) => s.id),
+        order: {
+          event_id: effectiveSlug,
+          parent_event_id: effectiveSlug,
+          cart_id: cleanCartId,
+          order_reference: effectiveOrderRef,
+          amount: effectiveAmount,
+          currency: 'SAR',
+          payment_method: 'paytabs',
+          tickets: builtTickets,
+          perks: builtPerks,
+          lang: 'ar',
+          app_source: 'web',
+          redirect: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}`,
+          redirect_failed: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}&failed=1`,
+        },
+        metadata: {
+          tickets: builtTickets,
+          perks: builtPerks,
+          selectedSeats: JSON.stringify(effectiveSeats),
+        }
       };
 
       // Candidate Webook official payment initiation endpoints
       const endpointsToTry = [
-        `${WEBOOK_API_BASE}/checkout/initiate?lang=ar`,
-        `${WEBOOK_API_BASE}/cart/checkout?lang=ar`,
-        `${WEBOOK_API_BASE}/checkout/payment?lang=ar`,
+        `${WEBOOK_API_BASE}/cart-checkout?lang=ar`,
+        `${WEBOOK_API_BASE}/event-detail/${encodeURIComponent(effectiveSlug)}/checkout?lang=ar`,
+        `${WEBOOK_API_BASE}/event-detail/${encodeURIComponent(effectiveSlug)}/event-seat/checkout?lang=ar`,
         `${WEBOOK_API_BASE}/checkout?lang=ar`,
+        `${WEBOOK_API_BASE}/cart/add-to-cart?lang=ar`,
+        `${WEBOOK_API_BASE}/season-detail/${encodeURIComponent(effectiveSlug)}/checkout?lang=ar`,
       ];
 
       let officialPaymentUrl: string | null = null;
@@ -650,7 +921,7 @@ async function startServer() {
 
       for (const endpoint of endpointsToTry) {
         try {
-          console.log(`[WEBOOK PAYMENT INITIATE] Forwarding to ${endpoint} with Bearer Token...`);
+          console.log(`[WEBOOK PAYMENT INITIATE] Forwarding to ${endpoint} with Bearer Token and validated tickets/perks payload...`);
           const checkoutApiRes = await fetch(endpoint, {
             method: 'POST',
             headers: upstreamHeaders,

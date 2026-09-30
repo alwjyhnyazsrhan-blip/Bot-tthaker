@@ -352,16 +352,69 @@ export class SchemaWorkflowService {
       ? (effectiveSeats.length > 0 ? effectiveSeats.length : Number(values.ticketQuantity) || 2)
       : (Number(values.ticketQuantity) || 1);
 
+    const builtTickets = effectiveSeats.length > 0
+      ? effectiveSeats.map((s: any, idx: number) => ({
+          id: String(s.tierId || effectiveTicketId || `ticket-${idx + 1}`),
+          ticket_id: String(s.tierId || effectiveTicketId || `ticket-${idx + 1}`),
+          event_ticket_id: String(s.tierId || effectiveTicketId || `ticket-${idx + 1}`),
+          qty: 1,
+          quantity: 1,
+          price: Number(s.price) || 85,
+          seat_id: String(s.id || `seat-${s.row || 'A'}-${s.number || idx + 1}`),
+          seatAndName: String(s.label || `${s.row || 'A'}-${s.number || idx + 1}`),
+        }))
+      : [
+          {
+            id: String(effectiveTicketId),
+            ticket_id: String(effectiveTicketId),
+            event_ticket_id: String(effectiveTicketId),
+            qty: effectiveQty,
+            quantity: effectiveQty,
+            price: 120,
+          }
+        ];
+
+    const builtPerks = [
+      {
+        id: 'perk_standard',
+        perk_id: 'perk_standard',
+        title: 'Standard Entry Perk',
+        tickets: builtTickets.map((t: any) => ({
+          id: t.id,
+          ticket_id: t.ticket_id || t.id,
+          qty: t.qty || t.quantity || 1,
+          quantity: t.quantity || t.qty || 1,
+        }))
+      }
+    ];
+
     const payload: Record<string, any> = {
       parent_event_id: slug,
+      event_id: slug,
       type: 'ticket',
+      ticket_id: effectiveTicketId,
       event_ticket_id: effectiveTicketId,
+      ticket_ids: builtTickets.map((t) => t.id),
+      tickets: builtTickets,
+      perks: builtPerks,
+      perk_ids: builtPerks.map((p) => p.id),
       quantity: effectiveQty,
       time_slot_date: values.selectedDate || '2026-10-15',
       time_slot: values.selectedTime || '20:00 - 23:00',
       app_source: 'web',
       lang: 'ar',
-      metadata: {}
+      order: {
+        parent_event_id: slug,
+        event_id: slug,
+        tickets: builtTickets,
+        perks: builtPerks,
+        lang: 'ar',
+        app_source: 'web',
+      },
+      metadata: {
+        tickets: builtTickets,
+        perks: builtPerks,
+      }
     };
 
     if (schema.hasTeams && values.selectedTeam) {
