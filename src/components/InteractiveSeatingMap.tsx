@@ -161,6 +161,24 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
       popupTab = window.open('about:blank', '_blank');
     } catch {}
 
+    // If live payment gateway URL was already intercepted from official API response, navigate directly!
+    if (cartHoldInfo?.paymentGatewayUrl && (cartHoldInfo.paymentGatewayUrl.includes('paytabs') || cartHoldInfo.paymentGatewayUrl.includes('secure-webook') || cartHoldInfo.paymentGatewayUrl.startsWith('http'))) {
+      let liveUrl = cartHoldInfo.paymentGatewayUrl.trim();
+      try {
+        liveUrl = new URL(liveUrl, window.location.origin).href;
+      } catch {}
+      if (popupTab && !popupTab.closed) {
+        popupTab.location.href = liveUrl;
+        return;
+      }
+      try {
+        const opened = window.open(liveUrl, '_blank', 'noopener,noreferrer');
+        if (opened) return;
+      } catch {}
+      window.location.href = liveUrl;
+      return;
+    }
+
     setIsInitiatingPayment(true);
     setPaymentSessionError(null);
     try {
@@ -1654,13 +1672,13 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
               </button>
 
               <a
-                href={cartHoldInfo?.cartId ? `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(cartHoldInfo.cartId)}&event=${encodeURIComponent(event.slug)}` : getWebookDirectCheckoutUrl()}
+                href={cartHoldInfo?.paymentGatewayUrl || (cartHoldInfo?.cartId ? `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(cartHoldInfo.cartId)}&event=${encodeURIComponent(event.slug)}` : getWebookDirectCheckoutUrl())}
                 target="_blank"
                 rel="noreferrer"
-                className="w-full sm:w-auto px-5 py-3 bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-2"
+                className="w-full sm:w-auto px-5 py-3 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-2"
               >
                 <CreditCard className="w-4 h-4 fill-slate-950" />
-                <span>💳 شاشة الدفع بالسلة النشطة (/checkout?cart_id=...)</span>
+                <span>💳 الانتقال الفوري لبوابة الدفع الرسمية (PayTabs)</span>
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
 

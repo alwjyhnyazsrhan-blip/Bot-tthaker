@@ -1967,7 +1967,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                       <div className="flex flex-wrap items-center gap-2.5">
                         <button
                           type="button"
-                          onClick={() => handleInitiateFreshPaymentSession(true)}
+                          onClick={handlePayNowClick}
                           disabled={isGeneratingPaymentSession}
                           className="flex-1 min-w-[220px] py-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm rounded-xl text-center shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition cursor-pointer"
                         >
@@ -1984,6 +1984,19 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                             </>
                           )}
                         </button>
+
+                        {activeCart?.paymentGatewayUrl && (
+                          <a
+                            href={activeCart.paymentGatewayUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-3.5 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-lg cursor-pointer"
+                            title="فتح الرابط المباشر المستخرج من استجابة Webook الرسمية"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>رابط PayTabs المباشر</span>
+                          </a>
+                        )}
 
                         <button
                           type="button"
@@ -2190,6 +2203,19 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                       </>
                     )}
                   </button>
+
+                  {activeCart?.paymentGatewayUrl && (
+                    <a
+                      href={activeCart.paymentGatewayUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-5 py-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition shadow-lg cursor-pointer border border-emerald-400/40"
+                      title="فتح رابط PayTabs المباشر المستخرج من استجابة API الرسمية"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>رابط بوابة PayTabs المباشر</span>
+                    </a>
+                  )}
 
                   {/* Fallback & Refresh Payment Button (Requests Fresh Payment URL to Prevent 404/Expiry) */}
                   <button
@@ -2524,6 +2550,18 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                           </>
                         )}
                       </button>
+
+                      {activeCart?.paymentGatewayUrl && (
+                        <a
+                          href={activeCart.paymentGatewayUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-4 py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-lg cursor-pointer"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>بوابة PayTabs المستخرجة</span>
+                        </a>
+                      )}
 
                       <button
                         type="button"

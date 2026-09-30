@@ -47,6 +47,7 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
   const [copiedInjector, setCopiedInjector] = useState<boolean>(false);
   const [apiError, setApiError] = useState<ReservationErrorState | null>(null);
   const [isCustomTestPayload, setIsCustomTestPayload] = useState<boolean>(false);
+  const [paymentGatewayUrl, setPaymentGatewayUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (userEmail) {
@@ -110,9 +111,10 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
         setIsReserved(true);
         setIsCustomTestPayload(Boolean(data.isCustomPayload));
         setApiError(null);
-        const dynamicCheckoutUrl = data.dynamicCheckoutUrl || `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(data.cartId)}&event=${encodeURIComponent(event.slug)}`;
-        // Automatically open the verified dynamic checkout screen with the active cart_id to prevent 404!
-        window.open(dynamicCheckoutUrl, '_blank', 'noopener,noreferrer');
+        const liveGatewayUrl = data.paymentGatewayUrl || data.redirect_url || data.paytabsRedirectUrl || data.dynamicCheckoutUrl || `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(data.cartId)}&event=${encodeURIComponent(event.slug)}`;
+        setPaymentGatewayUrl(liveGatewayUrl);
+        // Automatically open the verified live payment gateway URL directly to mirror native checkout behavior!
+        window.open(liveGatewayUrl, '_blank', 'noopener,noreferrer');
       } else {
         // Honest error handling - no fake confirmation modal!
         setIsReserved(false);
@@ -372,12 +374,13 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
                 </button>
 
                 <a
-                  href={cartId ? `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(cartId)}&event=${encodeURIComponent(event.slug)}` : getWebookDirectCheckoutUrl()}
+                  href={paymentGatewayUrl || (cartId ? `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(cartId)}&event=${encodeURIComponent(event.slug)}` : getWebookDirectCheckoutUrl())}
                   target="_blank"
                   rel="noreferrer"
-                  className="px-4 py-2 bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 text-xs font-black rounded-xl shadow-md transition flex items-center gap-1.5"
+                  className="px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 text-xs font-black rounded-xl shadow-md transition flex items-center gap-1.5"
                 >
-                  <span>💳 شاشة الدفع بالسلة النشطة (/checkout?cart_id=...)</span>
+                  <CreditCard className="w-3.5 h-3.5 fill-slate-950" />
+                  <span>💳 الانتقال الفوري لبوابة الدفع الرسمية (PayTabs)</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
 
@@ -397,7 +400,13 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
           {/* Primary Action Button */}
           <div className="space-y-3">
             <button
-              onClick={handleExecuteFullAutoBooking}
+              onClick={() => {
+                if (isReserved && paymentGatewayUrl) {
+                  window.open(paymentGatewayUrl, '_blank', 'noopener,noreferrer');
+                } else {
+                  handleExecuteFullAutoBooking();
+                }
+              }}
               disabled={isProcessing}
               className="w-full py-4 px-6 bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-500 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-sm rounded-2xl shadow-xl shadow-emerald-500/30 transition-all flex items-center justify-center gap-2 cursor-pointer transform hover:scale-[1.01] active:scale-[0.99] disabled:opacity-50"
             >
@@ -409,7 +418,7 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
               ) : isReserved ? (
                 <>
                   <CreditCard className="w-5 h-5 fill-slate-950" />
-                  <span>💳 فتح شاشة الدفع بالبطاقة مرة أخرى</span>
+                  <span>💳 فتح بوابة PayTabs الرسمية المستخرجة مباشرة</span>
                 </>
               ) : (
                 <>

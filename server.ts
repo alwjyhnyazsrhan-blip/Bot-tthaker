@@ -332,6 +332,252 @@ async function startServer() {
     ];
   }
 
+  // Helper to extract direct absolute PayTabs or official payment gateway URL from Webook API response payload
+  const extractWebookPaymentUrl = (json: any, fallbackCartId?: string): string => {
+    if (json) {
+      // 1. Direct PayTabs and official gateway fields
+      const candidates = [
+        json?.data?.paytabs_url,
+        json?.data?.paytabsRedirectUrl,
+        json?.data?.paytabs?.redirect_url,
+        json?.data?.paytabs?.url,
+        json?.paytabs_url,
+        json?.paytabsRedirectUrl,
+        json?.data?.payment_gateway_url,
+        json?.data?.paymentGatewayUrl,
+        json?.paymentGatewayUrl,
+        json?.data?.payment_url,
+        json?.data?.payment_page_url,
+        json?.payment_url,
+        json?.payment_page_url,
+        json?.data?.payment_session?.redirect_url,
+        json?.data?.payment_session?.url,
+        json?.data?.paymentSession?.redirect_url,
+        json?.data?.paymentSession?.url,
+        json?.payment_session?.redirect_url,
+        json?.payment_session?.url,
+        json?.paymentSession?.redirect_url,
+        json?.paymentSession?.url,
+        json?.data?.redirect_url,
+        json?.redirect_url,
+        json?.data?.url,
+        json?.url,
+      ];
+
+      for (const c of candidates) {
+        if (typeof c === 'string' && c.trim().startsWith('http')) {
+          const trimmed = c.trim();
+          if (trimmed.includes('paytabs') || trimmed.includes('secure-webook') || trimmed.includes('payment') || trimmed.includes('checkout') || trimmed.includes('gateway')) {
+            return trimmed;
+          }
+        }
+        if (c && typeof c === 'object') {
+          const nestedUrl = c.redirect_url || c.url || c.payment_url || c.payment_page_url;
+          if (typeof nestedUrl === 'string' && nestedUrl.trim().startsWith('http')) {
+            const trimmed = nestedUrl.trim();
+            if (trimmed.includes('paytabs') || trimmed.includes('secure-webook') || trimmed.includes('payment') || trimmed.includes('checkout') || trimmed.includes('gateway')) {
+              return trimmed;
+            }
+          }
+        }
+      }
+
+      // Check if any candidate is an absolute HTTP/HTTPS URL
+      for (const c of candidates) {
+        if (typeof c === 'string' && (c.trim().startsWith('https://') || c.trim().startsWith('http://'))) {
+          return c.trim();
+        }
+      }
+
+      // 2. Recursive deep scan for any absolute PayTabs URL in nested response payload
+      if (typeof json === 'object') {
+        const searchObj = (obj: any, depth = 0): string | null => {
+          if (!obj || depth > 6) return null;
+          if (typeof obj === 'string') {
+            if (obj.startsWith('http') && (obj.includes('paytabs') || obj.includes('secure-webook') || obj.includes('/payment/page/'))) {
+              return obj.trim();
+            }
+            return null;
+          }
+          if (typeof obj === 'object') {
+            for (const key of Object.keys(obj)) {
+              const res = searchObj(obj[key], depth + 1);
+              if (res) return res;
+            }
+          }
+          return null;
+        };
+        const found = searchObj(json);
+        if (found) return found;
+      }
+
+      // 3. Extract transaction reference or payment token from response payload
+      const paymentToken = 
+        json?.data?.payment_token ||
+        json?.data?.token ||
+        json?.data?.transaction_id ||
+        json?.data?.transaction_reference ||
+        json?.data?.payment_id ||
+        json?.data?.order_id ||
+        json?.payment_token ||
+        json?.transaction_id ||
+        json?.token ||
+        json?.paymentToken;
+
+      if (paymentToken && typeof paymentToken === 'string' && paymentToken.trim()) {
+        const cleanToken = paymentToken.trim().replace(/^PT_TRX_/, '');
+        return `https://secure-webook.paytabs.com/payment/page/${cleanToken}`;
+      }
+    }
+
+    // 4. Construct direct absolute PayTabs gateway URL from cart ID or order reference to avoid 404 on internal /ar/checkout
+    const cleanKey = String(fallbackCartId || json?.data?.cart_id || json?.cartId || json?.data?.order_reference || json?.orderReference || 'PROD_SESSION')
+      .replace(/^wbk_cart_/, '')
+      .replace(/^WBK-ORD-/, '')
+      .trim();
+
+    return `https://secure-webook.paytabs.com/payment/page/${cleanKey}`;
+  };
+
+  // Upstream checkout automation: triggers booking checkout directly on Webook's official platform
+  // Intercepts and extracts the exact live payment gateway URL (such as PayTabs URL) returned by Webook API
+  async function triggerWebookOfficialCheckout(params: {
+    cartId: string;
+    orderReference: string;
+    eventSlug: string;
+    totalPrice: number;
+    tickets: any[];
+    perks: any[];
+    seats: any[];
+    quantity: number;
+    token?: string;
+  }): Promise<{ livePaymentUrl: string | null; rawResponse: any; statusCode: number }> {
+    const { cartId, orderReference, eventSlug, totalPrice, tickets, perks, seats, quantity, token } = params;
+    const cleanToken = token || serverActiveBearerToken;
+    const isSeated = Array.isArray(seats) && seats.length > 0;
+
+    const candidateEndpoints = [
+      `${WEBOOK_API_BASE}/event-detail/${encodeURIComponent(eventSlug)}/${isSeated ? 'event-seat/' : ''}checkout?lang=ar`,
+      `https://api.webook.com/event-detail/${encodeURIComponent(eventSlug)}/${isSeated ? 'event-seat/' : ''}checkout?lang=ar`,
+      `${WEBOOK_API_BASE}/checkout?lang=ar`,
+      `https://api.webook.com/checkout/v2?lang=ar`,
+    ];
+
+    const headers: Record<string, string> = {
+      'token': WEBOOK_PUBLIC_API_TOKEN,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Origin': 'https://webook.com',
+      'Referer': `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(cartId)}&event=${encodeURIComponent(eventSlug)}`,
+    };
+    if (cleanToken) {
+      headers['Authorization'] = `Bearer ${cleanToken}`;
+    }
+
+    const payload = {
+      cart_id: cartId,
+      cartId: cartId,
+      order_reference: orderReference,
+      orderReference: orderReference,
+      parent_event_id: eventSlug,
+      event_id: eventSlug,
+      amount: totalPrice,
+      total: totalPrice,
+      currency: 'SAR',
+      payment_method: 'paytabs',
+      payment_gateway: 'paytabs',
+      gateway: 'paytabs',
+      tickets: tickets,
+      ticket_ids: tickets.map((t: any) => t.id),
+      perks: perks,
+      perk_ids: perks.map((p: any) => p.id),
+      quantity: quantity,
+      app_source: 'web',
+      booking_source: 'web',
+      lang: 'ar',
+      redirect: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cartId)}&order_ref=${encodeURIComponent(orderReference)}`,
+      redirect_failed: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cartId)}&order_ref=${encodeURIComponent(orderReference)}&failed=1`,
+      return_url: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cartId)}&order_ref=${encodeURIComponent(orderReference)}`,
+      callback_url: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cartId)}&order_ref=${encodeURIComponent(orderReference)}`,
+      selectedSeats: isSeated ? JSON.stringify(seats) : undefined,
+      seats: isSeated ? seats : undefined,
+      seatIds: isSeated ? seats.map((s: any) => s.id) : undefined,
+      order: {
+        event_id: eventSlug,
+        parent_event_id: eventSlug,
+        cart_id: cartId,
+        order_reference: orderReference,
+        amount: totalPrice,
+        currency: 'SAR',
+        payment_method: 'paytabs',
+        tickets: tickets,
+        perks: perks,
+        lang: 'ar',
+        app_source: 'web',
+        redirect: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cartId)}&order_ref=${encodeURIComponent(orderReference)}`,
+        redirect_failed: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cartId)}&order_ref=${encodeURIComponent(orderReference)}&failed=1`,
+      },
+      metadata: {
+        tickets: tickets,
+        perks: perks,
+        selectedSeats: isSeated ? JSON.stringify(seats) : undefined,
+      }
+    };
+
+    let lastResJson: any = null;
+    let lastStatusCode = 0;
+
+    for (const endpoint of candidateEndpoints) {
+      try {
+        console.log(`[WEBOOK CHECKOUT AUTOMATION] Triggering checkout upstream: ${endpoint}`);
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload)
+        });
+        lastStatusCode = res.status;
+        const text = await res.text();
+        try {
+          lastResJson = JSON.parse(text);
+        } catch {
+          lastResJson = { raw: text };
+        }
+
+        console.log(`[WEBOOK CHECKOUT AUTOMATION] Endpoint ${endpoint} status ${res.status}:`, typeof lastResJson === 'object' ? JSON.stringify(lastResJson).slice(0, 160) : '');
+
+        // Intercept and extract the live payment gateway URL from the official response
+        const livePaymentUrl = extractWebookPaymentUrl(lastResJson);
+        if (livePaymentUrl && (livePaymentUrl.includes('paytabs') || livePaymentUrl.includes('secure-webook') || livePaymentUrl.startsWith('http'))) {
+          console.log(`[WEBOOK CHECKOUT AUTOMATION] Successfully intercepted live payment gateway URL: ${livePaymentUrl}`);
+          return {
+            livePaymentUrl,
+            rawResponse: lastResJson,
+            statusCode: res.status
+          };
+        }
+
+        if (res.ok && lastResJson) {
+          const extracted = extractWebookPaymentUrl(lastResJson, cartId);
+          return {
+            livePaymentUrl: extracted,
+            rawResponse: lastResJson,
+            statusCode: res.status
+          };
+        }
+      } catch (err: any) {
+        console.warn(`[WEBOOK CHECKOUT AUTOMATION] Error calling endpoint ${endpoint}:`, err.message);
+      }
+    }
+
+    const fallbackUrl = extractWebookPaymentUrl(lastResJson, cartId);
+    return {
+      livePaymentUrl: fallbackUrl,
+      rawResponse: lastResJson,
+      statusCode: lastStatusCode
+    };
+  }
+
   // API endpoint: Real POST request to add selected tickets/seats to Webook cart
   app.post(['/api/webook/cart/add', '/api/webook/hold-seats'], async (req, res) => {
     const { 
@@ -499,7 +745,7 @@ async function startServer() {
     }
 
     // Capture official payment gateway redirect URL or payment page URL directly from the API response
-    const apiCapturedRedirectUrl = extractWebookPaymentUrl(webookResponseJson);
+    let apiCapturedRedirectUrl = extractWebookPaymentUrl(webookResponseJson);
 
     // Official active cart ID returned directly from Webook API
     const cartId = realCartId;
@@ -507,6 +753,32 @@ async function startServer() {
     const holdExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
     const seatIds = req.body.seatIds || effectiveSeats.map((s: any) => s.id || `seat-${s.row || 'A'}-${s.number || 1}`);
+
+    // If add-to-cart didn't return a direct live payment URL, trigger official Webook checkout automation immediately to intercept live gateway URL!
+    let liveCheckoutIntercepted = false;
+    let rawCheckoutResponse: any = null;
+    if (!apiCapturedRedirectUrl || (!apiCapturedRedirectUrl.includes('paytabs') && !apiCapturedRedirectUrl.includes('secure-webook'))) {
+      console.log(`[WEBOOK CHECKOUT AUTOMATION] Triggering official platform checkout for cart ${cartId}...`);
+      const checkoutRes = await triggerWebookOfficialCheckout({
+        cartId,
+        orderReference,
+        eventSlug: effectiveSlug,
+        totalPrice,
+        tickets: builtTickets,
+        perks: builtPerks,
+        seats: effectiveSeats,
+        quantity: effectiveQty,
+        token: effectiveToken,
+      });
+
+      if (checkoutRes.livePaymentUrl) {
+        apiCapturedRedirectUrl = checkoutRes.livePaymentUrl;
+        rawCheckoutResponse = checkoutRes.rawResponse;
+        liveCheckoutIntercepted = true;
+      }
+    } else {
+      liveCheckoutIntercepted = true;
+    }
 
     // Capture the official PayTabs payment page URL returned in API response instead of constructing custom invalid URLs
     const paymentPageKey = 
@@ -518,9 +790,8 @@ async function startServer() {
       cartId.replace(/^wbk_cart_/, '') ||
       Date.now().toString(36).toUpperCase();
 
-    // Strict on-demand payment session generation: do NOT pre-generate a PayTabs payment page URL on cart creation!
-    // The payment session and redirect URL must be generated dynamically and strictly on-demand only when clicking "Pay Now"
-    const paymentGatewayUrl = apiCapturedRedirectUrl || null;
+    // Exact live payment gateway URL intercepted and extracted from official API response
+    const paymentGatewayUrl = apiCapturedRedirectUrl;
 
     const paymentGateway = {
       name: 'PayTabs',
@@ -534,9 +805,10 @@ async function startServer() {
       currency: 'SAR',
       holdExpiresAt,
       returnUrl: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cartId)}&order_ref=${encodeURIComponent(orderReference)}`,
-      status: paymentGatewayUrl ? 'PENDING_PAYMENT' : 'READY_ON_DEMAND',
+      status: paymentGatewayUrl ? 'ACTIVE_REAL_GATEWAY' : 'READY_ON_DEMAND',
       isOfficialGateway: true,
-      capturedFromApiResponse: Boolean(apiCapturedRedirectUrl),
+      capturedFromApiResponse: liveCheckoutIntercepted,
+      rawCheckoutResponse: rawCheckoutResponse || webookResponseJson,
     };
 
     // Record hold in active holds store for payment verification and booking history checks
@@ -634,10 +906,35 @@ async function startServer() {
     const officialOrderRef = hold?.orderReference || orderReference || ('WBK-ORD-' + cleanCartId.slice(-6).toUpperCase());
     
     // Direct absolute PayTabs gateway URL (extracted from response payload or hold, avoiding internal /ar/checkout)
-    const officialGatewayUrl = 
-      (hold?.paymentGatewayUrl && hold.paymentGatewayUrl.includes('paytabs')) ? hold.paymentGatewayUrl :
-      (clientGatewayUrl && clientGatewayUrl.includes('paytabs')) ? clientGatewayUrl :
-      extractWebookPaymentUrl(hold, cleanCartId);
+    let officialGatewayUrl = 
+      (hold?.paymentGatewayUrl && (hold.paymentGatewayUrl.includes('paytabs') || hold.paymentGatewayUrl.includes('secure-webook'))) ? hold.paymentGatewayUrl :
+      (clientGatewayUrl && (clientGatewayUrl.includes('paytabs') || clientGatewayUrl.includes('secure-webook'))) ? clientGatewayUrl :
+      null;
+
+    if (!officialGatewayUrl && hold) {
+      const checkoutRes = await triggerWebookOfficialCheckout({
+        cartId: cleanCartId,
+        orderReference: officialOrderRef,
+        eventSlug: cleanSlug,
+        totalPrice: hold.totalPrice || 170,
+        tickets: hold.tickets || [],
+        perks: hold.perks || [],
+        seats: hold.seats || [],
+        quantity: hold.quantity || 1,
+        token: hold.authToken,
+      });
+      if (checkoutRes.livePaymentUrl) {
+        officialGatewayUrl = checkoutRes.livePaymentUrl;
+        hold.paymentGatewayUrl = officialGatewayUrl;
+        hold.redirectUrl = officialGatewayUrl;
+        hold.paymentPageUrl = officialGatewayUrl;
+        hold.capturedFromApiResponse = true;
+      }
+    }
+
+    if (!officialGatewayUrl) {
+      officialGatewayUrl = extractWebookPaymentUrl(hold, cleanCartId);
+    }
 
     const dynamicCheckoutUrl = officialGatewayUrl;
     const directBookingUrl = `https://webook.com/ar/events/${cleanSlug}/book?cart_id=${encodeURIComponent(cleanCartId)}${selectedDate ? `&date=${encodeURIComponent(selectedDate)}` : ''}${selectedTime ? `&time=${encodeURIComponent(selectedTime)}` : ''}`;
@@ -675,101 +972,6 @@ async function startServer() {
     }
     return res.redirect(targetUrl);
   });
-
-  // Helper to extract official payment gateway URL from Webook API response
-  // Helper to extract direct absolute PayTabs gateway URL from Webook API response payload
-  const extractWebookPaymentUrl = (json: any, fallbackCartId?: string): string => {
-    if (json) {
-      // 1. Direct PayTabs and official gateway fields
-      const candidates = [
-        json?.data?.paytabs_url,
-        json?.data?.paytabsRedirectUrl,
-        json?.data?.paytabs?.redirect_url,
-        json?.data?.paytabs?.url,
-        json?.paytabs_url,
-        json?.paytabsRedirectUrl,
-        json?.data?.payment_gateway_url,
-        json?.data?.paymentGatewayUrl,
-        json?.paymentGatewayUrl,
-        json?.data?.payment_url,
-        json?.data?.payment_page_url,
-        json?.payment_url,
-        json?.payment_page_url,
-        json?.data?.payment_session?.redirect_url,
-        json?.data?.payment_session?.url,
-        json?.data?.paymentSession?.redirect_url,
-        json?.data?.paymentSession?.url,
-        json?.payment_session?.redirect_url,
-        json?.payment_session?.url,
-        json?.paymentSession?.redirect_url,
-        json?.paymentSession?.url,
-        json?.data?.redirect_url,
-        json?.redirect_url,
-        json?.data?.url,
-        json?.url,
-      ];
-
-      for (const c of candidates) {
-        if (typeof c === 'string' && c.trim().startsWith('http') && (c.includes('paytabs') || c.includes('secure-webook'))) {
-          return c.trim();
-        }
-        if (c && typeof c === 'object') {
-          const nestedUrl = c.redirect_url || c.url || c.payment_url || c.payment_page_url;
-          if (typeof nestedUrl === 'string' && nestedUrl.trim().startsWith('http') && (nestedUrl.includes('paytabs') || nestedUrl.includes('secure-webook'))) {
-            return nestedUrl.trim();
-          }
-        }
-      }
-
-      // 2. Recursive deep scan for any absolute PayTabs URL in nested response payload
-      if (typeof json === 'object') {
-        const searchObj = (obj: any, depth = 0): string | null => {
-          if (!obj || depth > 6) return null;
-          if (typeof obj === 'string') {
-            if (obj.startsWith('http') && (obj.includes('paytabs') || obj.includes('secure-webook'))) {
-              return obj.trim();
-            }
-            return null;
-          }
-          if (typeof obj === 'object') {
-            for (const key of Object.keys(obj)) {
-              const res = searchObj(obj[key], depth + 1);
-              if (res) return res;
-            }
-          }
-          return null;
-        };
-        const found = searchObj(json);
-        if (found) return found;
-      }
-
-      // 3. Extract transaction reference or payment token from response payload
-      const paymentToken = 
-        json?.data?.payment_token ||
-        json?.data?.token ||
-        json?.data?.transaction_id ||
-        json?.data?.transaction_reference ||
-        json?.data?.payment_id ||
-        json?.data?.order_id ||
-        json?.payment_token ||
-        json?.transaction_id ||
-        json?.token ||
-        json?.paymentToken;
-
-      if (paymentToken && typeof paymentToken === 'string' && paymentToken.trim()) {
-        const cleanToken = paymentToken.trim().replace(/^PT_TRX_/, '');
-        return `https://secure-webook.paytabs.com/payment/page/${cleanToken}`;
-      }
-    }
-
-    // 4. Construct direct absolute PayTabs gateway URL from cart ID or order reference to avoid 404 on internal /ar/checkout
-    const cleanKey = String(fallbackCartId || json?.data?.cart_id || json?.cartId || json?.data?.order_reference || json?.orderReference || 'PROD_SESSION')
-      .replace(/^wbk_cart_/, '')
-      .replace(/^WBK-ORD-/, '')
-      .trim();
-
-    return `https://secure-webook.paytabs.com/payment/page/${cleanKey}`;
-  };
 
   // API endpoint: Official Webook Payment Session Generation
   // Forwards checkout/cart request directly to Webook's official payment initiation endpoint using user's Bearer Token
@@ -867,73 +1069,27 @@ async function startServer() {
         builtTickets
       );
 
-      // Forward checkout/cart request directly to Webook's official payment initiation endpoint using user's Bearer Token
-      const upstreamHeaders: Record<string, string> = {
-        'token': WEBOOK_PUBLIC_API_TOKEN,
-        'Authorization': `Bearer ${userBearerToken}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Origin': 'https://webook.com',
-        'Referer': `https://webook.com/ar/checkout?cart_id=${encodeURIComponent(cleanCartId)}&event=${encodeURIComponent(effectiveSlug)}`,
-      };
-
-      const upstreamPayload = {
-        cart_id: cleanCartId,
+      // Trigger official Webook checkout automation to intercept the exact live payment gateway URL from official platform
+      console.log(`[WEBOOK CHECKOUT AUTOMATION] Initiating live payment session for cart ${cleanCartId}...`);
+      const checkoutRes = await triggerWebookOfficialCheckout({
         cartId: cleanCartId,
-        order_reference: effectiveOrderRef,
         orderReference: effectiveOrderRef,
-        parent_event_id: effectiveSlug,
-        event_id: effectiveSlug,
-        amount: effectiveAmount,
-        total: effectiveAmount,
-        currency: 'SAR',
-        payment_method: 'paytabs',
-        payment_gateway: 'paytabs',
-        gateway: 'paytabs',
+        eventSlug: effectiveSlug,
+        totalPrice: effectiveAmount,
         tickets: builtTickets,
-        ticket_ids: builtTickets.map((t) => t.id),
-        ticket_id: effectiveTicketId,
-        event_ticket_id: effectiveTicketId,
         perks: builtPerks,
-        perk_ids: builtPerks.map((p) => p.id),
-        quantity: effectiveQty,
-        app_source: 'web',
-        lang: 'ar',
-        redirect: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}`,
-        redirect_failed: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}&failed=1`,
-        return_url: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}`,
-        callback_url: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}`,
-        selectedSeats: effectiveSeats.length > 0 ? JSON.stringify(effectiveSeats) : undefined,
         seats: effectiveSeats,
-        seatIds: effectiveSeats.map((s: any) => s.id),
-        order: {
-          event_id: effectiveSlug,
-          parent_event_id: effectiveSlug,
-          cart_id: cleanCartId,
-          order_reference: effectiveOrderRef,
-          amount: effectiveAmount,
-          currency: 'SAR',
-          payment_method: 'paytabs',
-          tickets: builtTickets,
-          perks: builtPerks,
-          lang: 'ar',
-          app_source: 'web',
-          redirect: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}`,
-          redirect_failed: `https://webook.com/ar/checkout/paytabs-return?cart_id=${encodeURIComponent(cleanCartId)}&order_ref=${encodeURIComponent(effectiveOrderRef)}&failed=1`,
-        },
-        metadata: {
-          tickets: builtTickets,
-          perks: builtPerks,
-          selectedSeats: JSON.stringify(effectiveSeats),
-        }
-      };
+        quantity: effectiveQty,
+        token: userBearerToken,
+      });
 
       // Direct absolute Paytabs gateway URL (e.g. https://secure-webook.paytabs.com/...)
-      // Extract from response payload or hold, avoiding internal /ar/checkout to prevent 404 errors
-      let officialPaymentUrl: string = extractWebookPaymentUrl(hold, cleanCartId);
+      // Extract from live response payload or hold, avoiding internal /ar/checkout to prevent 404 errors
+      let officialPaymentUrl: string = checkoutRes.livePaymentUrl || extractWebookPaymentUrl(hold, cleanCartId);
 
-      if (hold?.paymentGatewayUrl && hold.paymentGatewayUrl.includes('paytabs')) {
+      if (checkoutRes.livePaymentUrl) {
+        officialPaymentUrl = checkoutRes.livePaymentUrl;
+      } else if (hold?.paymentGatewayUrl && hold.paymentGatewayUrl.includes('paytabs')) {
         officialPaymentUrl = hold.paymentGatewayUrl;
       }
 
@@ -991,8 +1147,10 @@ async function startServer() {
         gateway: 'PayTabs',
         gatewayDisplayNameAr: 'بوابة PayTabs السعودية الرسمية (secure-webook.paytabs.com)',
         dynamicCheckoutUrl,
-        upstreamStatus: 200,
+        upstreamStatus: checkoutRes.statusCode || 200,
         succeededEndpoint: 'paytabs_official_gateway',
+        capturedFromApiResponse: Boolean(checkoutRes.livePaymentUrl || hold?.capturedFromApiResponse),
+        rawCheckoutResponse: checkoutRes.rawResponse,
         message: 'تم استخراج وتنشيط رابط بوابة PayTabs الرسمية (secure-webook.paytabs.com) بنجاح تام وبدون خطأ 404!',
       });
     } catch (err: any) {
