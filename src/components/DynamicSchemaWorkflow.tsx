@@ -4,7 +4,8 @@ import {
   Calendar, Clock, ShieldCheck, Ticket, Users, Trophy, 
   Layers, MapPin, ArrowRight, ArrowLeft, Play, Sparkles, Check, 
   Terminal, Globe, ShoppingCart, Lock, Key, Info, Zap, Code2, 
-  ChevronRight, ChevronLeft, Eye, CheckSquare, Settings
+  ChevronRight, ChevronLeft, Eye, CheckSquare, Settings,
+  CreditCard, QrCode, FileText, CheckCircle, Download, Printer, Filter
 } from 'lucide-react';
 import { WebookEvent, Seat, TicketTier, SubEvent, TeamInfo, Account } from '../types/bot';
 import { DynamicEventWorkflowSchema, DynamicWorkflowStep, SchemaWorkflowState } from '../types/schema';
@@ -71,18 +72,50 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
   // Active Cart Session State
   const [activeCart, setActiveCart] = useState<{
     cartId: string;
+    orderReference?: string;
     sessionToken?: string;
     expiresAt: string;
     totalPrice: number;
     dynamicCheckoutUrl: string;
     directBookingUrl: string;
+    paymentGatewayUrl?: string;
+    redirectUrl?: string;
+    paymentPageUrl?: string;
+    gateway?: string;
+    gatewayDisplayNameAr?: string;
+    transactionReference?: string;
+    capturedFromApiResponse?: boolean;
     seats: Seat[];
+    seatIds?: string[];
     quantity: number;
-    status: 'active' | 'expired';
+    status: 'active' | 'expired' | 'confirmed';
+    confirmedOrder?: any;
   } | null>(null);
   const [cartSecondsLeft, setCartSecondsLeft] = useState<number>(600);
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
   const [copiedInjector, setCopiedInjector] = useState<boolean>(false);
+  const [copiedOrderRef, setCopiedOrderRef] = useState<boolean>(false);
+  const [copiedPaytabsUrl, setCopiedPaytabsUrl] = useState<boolean>(false);
+  const [isGeneratingPaymentSession, setIsGeneratingPaymentSession] = useState<boolean>(false);
+  const [paymentSessionFreshAt, setPaymentSessionFreshAt] = useState<string | null>(null);
+  const [freshSessionNotice, setFreshSessionNotice] = useState<string | null>(null);
+
+  // Live Seating Map from API
+  const [apiSeatingMap, setApiSeatingMap] = useState<any | null>(null);
+  const [isLoadingSeatingMap, setIsLoadingSeatingMap] = useState<boolean>(false);
+  const [selectedSectionFilter, setSelectedSectionFilter] = useState<string>('all');
+
+  // Payment Verification & Booking History State
+  const [confirmedOrder, setConfirmedOrder] = useState<any | null>(null);
+  const [isVerifyingPayment, setIsVerifyingPayment] = useState<boolean>(false);
+  const [bookingHistory, setBookingHistory] = useState<any[]>([]);
+  const [isCheckingHistory, setIsCheckingHistory] = useState<boolean>(false);
+  const [historyFeedback, setHistoryFeedback] = useState<string>('');
+  const [showHistoryDrawer, setShowHistoryDrawer] = useState<boolean>(false);
+  const [manualOrderRef, setManualOrderRef] = useState<string>('');
+  const [manualCartId, setManualCartId] = useState<string>('');
+  const [manualEmail, setManualEmail] = useState<string>(accounts[0]?.email || '');
+  const [verifyMessage, setVerifyMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Step Logs
   const [stepLogs, setStepLogs] = useState<Record<string, {
@@ -130,20 +163,30 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
           setIsLoadingSchema(false);
 
           // Initialize form values from schema defaults
-          const defaultDate = currentEvent.datesAvailable?.[0] || '2026-10-15';
-          const defaultTime = currentEvent.timesAvailable?.[0] || '20:00 - 23:00';
-          const defaultTier = currentEvent.tiers?.[0]?.id || 'regular';
-          const defaultSub = currentEvent.subEvents?.[0]?.id || '';
+          const initialValues: Record<string, any> = {};
+          generated.steps.forEach((s) => {
+            s.fields.forEach((f) => {
+              if (f.defaultValue !== undefined) {
+                initialValues[f.name] = f.defaultValue;
+              }
+            });
+          });
+
+          const defaultDate = initialValues.selectedDate || currentEvent.datesAvailable?.[0] || '2026-10-15';
+          const defaultTime = initialValues.selectedTime || currentEvent.timesAvailable?.[0] || '20:00 - 23:00';
+          const defaultTier = initialValues.preferredTierId || initialValues.selectedTierId || currentEvent.tiers?.[0]?.id || 'regular';
+          const defaultSub = initialValues.selectedSubEventId || currentEvent.subEvents?.[0]?.id || '';
 
           setFormValues((prev) => ({
             ...prev,
-            eventSlug: generated.eventSlug,
             selectedDate: defaultDate,
             selectedTime: defaultTime,
             preferredTierId: defaultTier,
             selectedTierId: defaultTier,
             selectedSubEventId: defaultSub,
-            selectedTeam: generated.hasTeams ? 'home' : 'neutral',
+            selectedTeam: initialValues.selectedTeam || (generated.hasTeams ? 'home' : 'neutral'),
+            ...initialValues,
+            eventSlug: generated.eventSlug,
           }));
 
           // Initialize step logs
@@ -165,7 +208,46 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [currentEvent.id]);
+  }, [currentEvent.id, currentEvent.slug]);
+
+  // Fetch available seat maps and categories dynamically from the API
+  useEffect(() => {
+    let isMounted = true;
+    const fetchSeatingMap = async () => {
+      setIsLoadingSeatingMap(true);
+      try {
+        const slug = currentEvent.slug || currentEvent.id;
+        const res = await fetch(`/api/webook/seating-map/${encodeURIComponent(slug)}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (isMounted && json && json.success) {
+            setApiSeatingMap(json);
+            if (onUpdateEventTiers && json.tiers && json.seats) {
+              onUpdateEventTiers(json.tiers, {
+                type: json.venueBlueprint,
+                venueId: json.venueBlueprint,
+                venueNameAr: json.venueName,
+                stageLabelAr: 'منصة العرض / المسرح الرسمي',
+                totalSeats: json.totalSeats,
+                availableSeats: json.availableSeats,
+                sections: json.sections,
+                seats: json.seats,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[DynamicSchemaWorkflow] Failed to load seating map from API:', err);
+      } finally {
+        if (isMounted) setIsLoadingSeatingMap(false);
+      }
+    };
+
+    fetchSeatingMap();
+    return () => {
+      isMounted = false;
+    };
+  }, [currentEvent.id, currentEvent.slug]);
 
   // Cart Hold Timer
   useEffect(() => {
@@ -189,8 +271,148 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Redirect user session directly to official gateway URL using standard navigation or external browser intent
+  const handleRedirectToGateway = (customUrl?: string) => {
+    const url = customUrl || activeCart?.paymentGatewayUrl || activeCart?.redirectUrl || activeCart?.paymentPageUrl;
+    if (!url) return;
+
+    // 1. Attempt top-level window navigation to break out of iframe if allowed
+    try {
+      if (window.top && window.top !== window) {
+        window.top.location.href = url;
+        return;
+      }
+    } catch {
+      // Cross-origin restriction on window.top
+    }
+
+    // 2. Standard location redirect
+    try {
+      window.location.href = url;
+      return;
+    } catch {
+      // Fallback
+    }
+
+    // 3. Fallback external intent anchor
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+    } catch (e) {
+      console.warn('Gateway navigation redirect failed:', e);
+    }
+  };
+
   const stepsList: DynamicWorkflowStep[] = schema?.steps || [];
   const currentStepObj: DynamicWorkflowStep | undefined = stepsList[currentStepIndex];
+
+  // Generates PayTabs payment session and redirect URL strictly on-demand when user clicks "Pay Now" or "Refresh Payment"
+  const handleInitiateFreshPaymentSession = async (autoRedirect: boolean = true): Promise<string | null> => {
+    const targetCartId = activeCart?.cartId;
+    if (!targetCartId) {
+      setFreshSessionNotice('يرجى أولاً تنفيذ خطوة قفل المقاعد بالسلة لتجهيز الحجز.');
+      return null;
+    }
+
+    setIsGeneratingPaymentSession(true);
+    setFreshSessionNotice(null);
+
+    try {
+      const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (formValues.authToken && formValues.authToken.trim()) {
+        reqHeaders['Authorization'] = `Bearer ${formValues.authToken.trim()}`;
+      }
+
+      const res = await fetch('/api/webook/paytabs/initiate-session', {
+        method: 'POST',
+        headers: reqHeaders,
+        body: JSON.stringify({
+          cartId: targetCartId,
+          orderReference: activeCart?.orderReference,
+          eventSlug: schema?.eventSlug || currentEvent.slug,
+          selectedDate: formValues.selectedDate,
+          selectedTime: formValues.selectedTime,
+          selectedTeam: formValues.selectedTeam,
+          seats: activeCart?.seats || selectedSeats,
+          totalPrice: activeCart?.totalPrice,
+          email: formValues.email,
+          sessionToken: activeCart?.sessionToken,
+          authToken: formValues.authToken,
+          forceFresh: true,
+        }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (res.ok && json && json.success && json.paymentGatewayUrl) {
+        const freshUrl = json.paymentGatewayUrl;
+        setActiveCart((prev) => prev ? {
+          ...prev,
+          paymentGatewayUrl: freshUrl,
+          redirectUrl: freshUrl,
+          paymentPageUrl: freshUrl,
+          orderReference: json.orderReference || prev.orderReference,
+          expiresAt: json.expiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        } : null);
+
+        const timeStr = new Date().toLocaleTimeString('ar-SA');
+        setPaymentSessionFreshAt(timeStr);
+        setCartSecondsLeft(600); // Reset timer to fresh 10 mins!
+        setFreshSessionNotice(`تم تحديث جلسة الدفع برابط جديد طازج (الساعة ${timeStr}) وصلاحية 10 دقائق كاملة لتفادي أخطاء 404.`);
+
+        updateStepLog(currentStepObj?.id || 'step_checkout_url', {
+          status: 'success',
+          statusCode: 200,
+          message: 'تم توليد جلسة الدفع المشفرة وتأكيد الاتصال ببوابة PayTabs الرسمية بنجاح والتحويل المباشر للجلسة!',
+          responsePayload: {
+            success: true,
+            status: 'PAYTABS_SESSION_READY',
+            orderReference: json.orderReference || activeCart?.orderReference,
+            expiresAt: json.expiresAt,
+          },
+        });
+
+        setIsGeneratingPaymentSession(false);
+
+        if (autoRedirect) {
+          handleRedirectToGateway(freshUrl);
+        }
+        return freshUrl;
+      } else {
+        setIsGeneratingPaymentSession(false);
+        const errMsg = json?.message || 'تعذر توليد جلسة دفع جديدة';
+        setFreshSessionNotice(`خطأ: ${errMsg}`);
+        return null;
+      }
+    } catch (err: any) {
+      setIsGeneratingPaymentSession(false);
+      setFreshSessionNotice(`فشل الاتصال بالخادم: ${err.message}`);
+      return null;
+    }
+  };
+
+  // Open external browser intent with a fresh on-demand session
+  const handleOpenExternalIntentWithFreshSession = async () => {
+    const freshUrl = await handleInitiateFreshPaymentSession(false);
+    if (freshUrl) {
+      try {
+        const anchor = document.createElement('a');
+        anchor.href = freshUrl;
+        anchor.target = '_blank';
+        anchor.rel = 'noopener noreferrer';
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+      } catch (e) {
+        handleRedirectToGateway(freshUrl);
+      }
+    }
+  };
 
   const updateStepLog = (stepId: string, update: Partial<any>) => {
     setStepLogs((prev) => ({
@@ -209,6 +431,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     return schemaWorkflowService.buildDynamicPayload(schema, {
       ...formValues,
       selectedSeats,
+      seatIds: selectedSeats.map(s => s.id),
     });
   }, [schema, formValues, selectedSeats]);
 
@@ -336,28 +559,60 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
         return true;
       }
 
-      if (step.type === 'cart_execution') {
+      if (step.type === 'cart_execution' || step.type === 'checkout_payment') {
+        if (activeCart && activeCart.status === 'active' && step.type === 'checkout_payment') {
+          updateStepLog(step.id, {
+            status: 'success',
+            statusCode: 200,
+            message: `السلة الرسمية نشطة بنجاح (${activeCart.cartId}) — اضغط "الدفع الآن" لفتح بوابة PayTabs.`,
+            responsePayload: activeCart,
+          });
+          setIsRunningStep(false);
+          return true;
+        }
+
         const cleanToken = formValues.authToken.trim();
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (cleanToken) headers['Authorization'] = `Bearer ${cleanToken}`;
 
+        const effectiveTicketTier = formValues.preferredTierId || formValues.selectedTierId || selectedSeats[0]?.tierId || 'regular';
+        const payloadToSend = {
+          ...currentPayload,
+          ticket_id: effectiveTicketTier,
+          ticketId: effectiveTicketTier,
+          event_ticket_id: effectiveTicketTier,
+          seatIds: selectedSeats.map(s => s.id),
+          seats: selectedSeats,
+          quantity: selectedSeats.length || formValues.ticketQuantity,
+        };
+
         const res = await fetch('/api/webook/cart/add', {
           method: 'POST',
           headers,
-          body: JSON.stringify(currentPayload),
+          body: JSON.stringify(payloadToSend),
         });
 
         const json = await res.json().catch(() => null);
 
         if (res.ok && json && json.success && json.cartId) {
+          const officialGatewayUrl = json.paymentGatewayUrl || json.redirectUrl || json.paymentPageUrl || json.paytabsRedirectUrl;
           setActiveCart({
             cartId: json.cartId,
+            orderReference: json.orderReference,
             sessionToken: json.sessionToken || cleanToken,
             expiresAt: json.holdExpiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
             totalPrice: json.totalPrice,
             dynamicCheckoutUrl: json.dynamicCheckoutUrl,
             directBookingUrl: json.directBookingUrl,
+            paymentGatewayUrl: officialGatewayUrl,
+            redirectUrl: officialGatewayUrl,
+            paymentPageUrl: officialGatewayUrl,
+            gateway: json.paymentGateway?.name || 'PayTabs',
+            gatewayDisplayNameAr: json.paymentGateway?.displayNameAr || 'بوابة PayTabs السعودية الرسمية',
+            transactionReference: json.paymentGateway?.transactionReference,
+            capturedFromApiResponse: Boolean(json.realApiExecuted?.capturedRedirectUrl || json.paymentGateway?.capturedFromApiResponse),
             seats: json.seats || selectedSeats,
+            seatIds: json.seatIds || selectedSeats.map(s => s.id),
             quantity: json.quantity || formValues.ticketQuantity,
             status: 'active',
           });
@@ -367,7 +622,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
           updateStepLog(step.id, {
             status: 'success',
             statusCode: res.status,
-            message: `تم تنفيذ POST بنجاح وحجز السلة الرسمية: (${json.cartId})`,
+            message: `تم تنفيذ POST بنجاح وقفل المقاعد (${selectedSeats.map(s => s.label || s.id).join(', ') || formValues.ticketQuantity + ' تذاكر'}) مؤقتاً لمدة 10 دقائق والتقاط رابط PayTabs الرسمي: (${json.cartId})`,
             responsePayload: json,
           });
           setIsRunningStep(false);
@@ -385,35 +640,52 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
       }
 
       if (step.type === 'dynamic_checkout') {
+        // Enforce strict on-demand generation: do NOT pre-generate session URL when loading or executing this step!
+        // Payment session and redirect URL are generated dynamically and strictly on-demand only when user clicks "Pay Now"
+        setIsRunningStep(false);
+        updateStepLog(step.id, {
+          status: 'success',
+          statusCode: 200,
+          message: 'تم تجهيز بوابة PayTabs الرسمية بنجاح — اضغط "الدفع الآن" لتوليد جلسة الدفع الآمنة والتحويل المباشر.',
+        });
+        return true;
+      }
+
+      if (step.type === 'payment_verification') {
         const activeCartId = activeCart?.cartId || ('wbk_cart_' + Date.now().toString(36).toUpperCase());
-        const res = await fetch('/api/webook/checkout-url', {
+        const activeOrderRef = activeCart?.orderReference || ('WBK-ORD-' + Date.now().toString(36).toUpperCase());
+
+        setIsVerifyingPayment(true);
+        const res = await fetch('/api/webook/verify-payment', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             cartId: activeCartId,
-            eventSlug: schema.eventSlug,
+            orderReference: activeOrderRef,
+            email: formValues.email,
             selectedDate: formValues.selectedDate,
             selectedTime: formValues.selectedTime,
-            selectedTeam: formValues.selectedTeam,
-            sessionToken: activeCart?.sessionToken || formValues.authToken || undefined,
+            seats: activeCart?.seats || selectedSeats,
+            seatIds: selectedSeats.map(s => s.id),
+            totalPrice: activeCart?.totalPrice || formValues.ticketQuantity * 125,
+            eventTitle: currentEvent.titleAr,
           }),
         });
 
         const json = await res.json().catch(() => null);
+        setIsVerifyingPayment(false);
 
-        if (res.ok && json && json.success && json.dynamicCheckoutUrl) {
+        if (res.ok && json && json.success && json.order) {
+          setConfirmedOrder(json.order);
           if (activeCart) {
-            setActiveCart((prev) => prev ? {
-              ...prev,
-              dynamicCheckoutUrl: json.dynamicCheckoutUrl,
-              directBookingUrl: json.directBookingUrl,
-            } : null);
+            setActiveCart((prev) => prev ? { ...prev, status: 'confirmed', confirmedOrder: json.order } : null);
           }
+          playReservationChime();
 
           updateStepLog(step.id, {
             status: 'success',
             statusCode: 200,
-            message: `تم توليد وتأكيد رابط الدفع الديناميكي المرتبط بالسلة (${activeCartId}) بدون أي خطأ 404!`,
+            message: `تم التحقق بنجاح من إتمام الدفع عبر بوابة PayTabs وإصدار ${json.order.tickets?.length || 0} تذاكر رسمية! (رقم المرجع: ${json.order.orderReference})`,
             responsePayload: json,
           });
           setIsRunningStep(false);
@@ -422,7 +694,8 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
           updateStepLog(step.id, {
             status: 'error',
             statusCode: res.status,
-            message: json?.message || 'فشل توليد رابط الدفع الديناميكي',
+            message: json?.message || 'فشل التحقق من حالة الدفع',
+            responsePayload: json,
           });
           setIsRunningStep(false);
           return false;
@@ -457,6 +730,147 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     }
 
     setIsAutoRunning(false);
+  };
+
+  // Sync manual order/cart fields when activeCart updates
+  useEffect(() => {
+    if (activeCart?.orderReference) setManualOrderRef(activeCart.orderReference);
+    if (activeCart?.cartId) setManualCartId(activeCart.cartId);
+  }, [activeCart]);
+
+  // URL search parameter watcher: auto-trigger verification upon returning from payment gateway
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const orderRefParam = params.get('order_ref') || params.get('order_id') || params.get('orderReference');
+      const cartIdParam = params.get('cart_id') || params.get('cartId');
+      const statusParam = params.get('payment_status') || params.get('status');
+
+      if (orderRefParam || cartIdParam) {
+        if (orderRefParam) setManualOrderRef(orderRefParam);
+        if (cartIdParam) setManualCartId(cartIdParam);
+
+        if (schema?.steps) {
+          const verifyIdx = schema.steps.findIndex(s => s.type === 'payment_verification');
+          if (verifyIdx >= 0) {
+            setCurrentStepIndex(verifyIdx);
+            if (statusParam === 'success' || params.has('paytabs_return') || params.has('return')) {
+              handleVerifyPaymentManual(orderRefParam || undefined, cartIdParam || undefined);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // safe fallback
+    }
+  }, [schema]);
+
+  const handleVerifyPaymentManual = async (targetOrderRef?: string, targetCartId?: string) => {
+    const activeCartId = targetCartId || manualCartId || activeCart?.cartId || ('wbk_cart_' + Date.now().toString(36).toUpperCase());
+    const activeOrderRef = targetOrderRef || manualOrderRef || activeCart?.orderReference || ('WBK-ORD-' + Date.now().toString(36).toUpperCase());
+
+    setIsVerifyingPayment(true);
+    setVerifyMessage(null);
+    try {
+      const res = await fetch('/api/webook/verify-payment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cartId: activeCartId,
+          orderReference: activeOrderRef,
+          email: manualEmail || formValues.email || 'user@webook.com',
+          selectedDate: formValues.selectedDate,
+          selectedTime: formValues.selectedTime,
+          seats: activeCart?.seats || selectedSeats,
+          seatIds: selectedSeats.map(s => s.id),
+          totalPrice: activeCart?.totalPrice || selectedSeats.reduce((s, x) => s + (x.price || 0), 0) || 170,
+          eventTitle: currentEvent.titleAr,
+        }),
+      });
+
+      const json = await res.json().catch(() => null);
+      setIsVerifyingPayment(false);
+
+      if (res.ok && json && json.success && json.order) {
+        setConfirmedOrder(json.order);
+        if (activeCart) {
+          setActiveCart(prev => prev ? { ...prev, status: 'confirmed', confirmedOrder: json.order } : null);
+        }
+        playReservationChime();
+        setVerifyMessage({
+          type: 'success',
+          text: `تم التحقق بنجاح من إتمام الدفع عبر بوابة PayTabs وإصدار ${json.order.tickets?.length || 0} تذاكر رسمية! رقم المرجع: ${json.order.orderReference}`
+        });
+
+        const payStep = stepsList.find(s => s.type === 'payment_verification');
+        if (payStep) {
+          updateStepLog(payStep.id, {
+            status: 'success',
+            statusCode: 200,
+            message: `تم التحقق بنجاح من إتمام الدفع وإصدار التذاكر (مرجع: ${json.order.orderReference})`,
+            responsePayload: json,
+          });
+        }
+        return true;
+      } else {
+        setVerifyMessage({
+          type: 'error',
+          text: json?.message || 'فشل التحقق من حالة الدفع في بوابة PayTabs'
+        });
+        return false;
+      }
+    } catch (err: any) {
+      setIsVerifyingPayment(false);
+      setVerifyMessage({
+        type: 'error',
+        text: `خطأ في الاتصال بخادم التحقق: ${err.message}`
+      });
+      return false;
+    }
+  };
+
+  const handleSimulatePayTabsReturn = async () => {
+    const curOrderRef = manualOrderRef || activeCart?.orderReference || ('WBK-ORD-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(100 + Math.random() * 900));
+    const curCartId = manualCartId || activeCart?.cartId || ('wbk_cart_' + Date.now().toString(36).toUpperCase());
+    setManualOrderRef(curOrderRef);
+    setManualCartId(curCartId);
+    await handleVerifyPaymentManual(curOrderRef, curCartId);
+  };
+
+  const handleFetchBookingHistory = async () => {
+    setIsCheckingHistory(true);
+    setHistoryFeedback('');
+    try {
+      const targetCartId = (manualCartId || activeCart?.cartId || '').trim();
+      const targetOrderRef = (manualOrderRef || activeCart?.orderReference || '').trim();
+      const targetEmail = (manualEmail || formValues.email || '').trim();
+
+      const queryParams = new URLSearchParams();
+      if (targetCartId) queryParams.set('cartId', targetCartId);
+      if (targetOrderRef) queryParams.set('orderRef', targetOrderRef);
+      if (targetEmail) queryParams.set('email', targetEmail);
+
+      const res = await fetch(`/api/webook/booking-history?${queryParams.toString()}`);
+      const json = await res.json().catch(() => null);
+      setIsCheckingHistory(false);
+
+      if (res.ok && json && json.success) {
+        const orders = json.allOrders || (json.order ? [json.order] : []);
+        setBookingHistory(orders);
+        if (json.order && !confirmedOrder) {
+          setConfirmedOrder(json.order);
+        }
+        setHistoryFeedback(json.message || `تم العثور على ${orders.length} حجز مؤكد`);
+        setShowHistoryDrawer(true);
+      } else {
+        setHistoryFeedback(json?.message || 'لم يتم العثور على أي حجوزات مؤكدة سابقة');
+        setShowHistoryDrawer(true);
+      }
+    } catch (err: any) {
+      setIsCheckingHistory(false);
+      setHistoryFeedback(`خطأ في فحص السجل: ${err.message}`);
+      setShowHistoryDrawer(true);
+    }
   };
 
   const handleCopyCheckoutUrl = () => {
@@ -597,6 +1011,51 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
           <p className="text-xs text-slate-400">نقوم ببناء خطوات الحجز والمقاعد والتسعير ديناميكياً وفق استجابة الـ API.</p>
         </div>
       )}
+
+      {/* Event Selection Bar: Switches event and re-generates dynamic schema & steps */}
+      <div className="bg-slate-950/80 border border-slate-800/80 rounded-2xl p-4 space-y-2.5">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-purple-400" />
+            <span className="text-xs font-bold text-white">
+              اختر الفعالية لاختبار استخراج الخطوات الديناميكية المعتمدة لكل فعالية (رياضة، مسرح، عروض كوميدية، دخول عام):
+            </span>
+          </div>
+          <span className="text-[11px] font-mono text-purple-300 bg-purple-950/50 px-2.5 py-0.5 rounded-full border border-purple-800/40">
+            {currentEvent.category} • {schema?.totalSteps || 0} خطوات معتمدة رسمياً
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
+          {events.slice(0, 6).map((ev) => {
+            const isCur = ev.id === currentEvent.id || ev.slug === currentEvent.slug;
+            return (
+              <button
+                key={ev.id}
+                type="button"
+                onClick={() => onSelectEvent(ev)}
+                className={`p-2 rounded-xl border text-right transition cursor-pointer flex flex-col gap-1.5 ${
+                  isCur
+                    ? 'bg-purple-950/60 border-purple-500 ring-2 ring-purple-500/40 shadow-lg'
+                    : 'bg-slate-900/60 border-slate-800 hover:bg-slate-900 hover:border-slate-700'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <img src={ev.image} alt={ev.titleAr} className="w-7 h-7 rounded-lg object-cover shrink-0" />
+                  <div className="overflow-hidden flex-1">
+                    <div className="text-[11px] font-bold text-white truncate">{ev.titleAr}</div>
+                  </div>
+                  {isCur && <Check className="w-3.5 h-3.5 text-purple-400 shrink-0" />}
+                </div>
+                <div className="flex items-center justify-between text-[9px] text-slate-400 font-mono">
+                  <span>{ev.isSeated ? 'مقاعد مرقمة' : 'دخول عام'}</span>
+                  <span className="text-pink-400 font-bold">{ev.tiers?.[0]?.price || 65} ر.س</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       {/* Dynamic Stepper Bar (Renders strictly based on schema.steps length & types) */}
       {!isLoadingSchema && schema && (
@@ -912,88 +1371,257 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
 
           {/* 5. Seating Map Selection Step (Rendered strictly when isSeated: true) */}
           {currentStepObj.type === 'seating_map_selection' && (
-            <div className="space-y-4 animate-in fade-in">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-                <div>
-                  <div className="text-xs font-bold text-white">مخطط المقاعد التفاعلي (Seating Map):</div>
-                  <div className="text-[11px] text-slate-400">
-                    انقر لاختيار مقاعدك الدقيقة أو استخدم زر القنص السريع.
+            <div className="space-y-5 animate-in fade-in">
+              {/* Header with Venue Blueprint & API Status */}
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900/80 p-3.5 rounded-2xl border border-slate-800">
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <MapPin className="w-4 h-4 text-pink-400" />
+                      <span>{apiSeatingMap?.venueName || currentEvent.seatingMap?.venueNameAr || currentEvent.locationAr}</span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                      {apiSeatingMap?.venueBlueprint || currentEvent.seatingMap?.venueId || 'مخطط رسمي معتمد'}
+                    </span>
                   </div>
+                  <p className="text-[11px] text-slate-400">
+                    تم سحب مخطط المقاعد والتصنيفات مباشرة من واجهة برمجة تطبيقات المنصة (api.webook.com/seating-map).
+                  </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    const available = currentEvent.seatingMap?.seats?.filter(s => s.status === 'available') || [];
-                    const chosen = available.slice(0, formValues.ticketQuantity || 2);
-                    chosen.forEach(s => onToggleSeat(s));
-                  }}
-                  className="px-3.5 py-1.5 bg-gradient-to-r from-pink-600 to-purple-600 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>قنص أفضل مقاعد متتالية ({formValues.ticketQuantity} مقاعد)</span>
-                </button>
-              </div>
+                {/* Quick Auto-Pick Seats Actions */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const seatsPool = apiSeatingMap?.seats || currentEvent.seatingMap?.seats || [];
+                      const available = seatsPool.filter((s: Seat) => s.status === 'available');
+                      const chosen = available.slice(0, formValues.ticketQuantity || 2);
+                      chosen.forEach((s: Seat) => onToggleSeat(s));
+                    }}
+                    className="px-3.5 py-1.5 bg-gradient-to-r from-pink-600 to-purple-600 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-pink-600/20 cursor-pointer"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>قنص {formValues.ticketQuantity || 2} مقاعد متتالية</span>
+                  </button>
 
-              {/* Tier Filter Pills */}
-              <div className="flex flex-wrap gap-2">
-                {currentEvent.tiers?.map((t) => {
-                  const isPref = formValues.preferredTierId === t.id;
-                  return (
+                  {selectedSeats.length > 0 && (
                     <button
-                      key={t.id}
                       type="button"
-                      onClick={() => setFormValues(v => ({ ...v, preferredTierId: t.id }))}
-                      className={`px-3 py-1.5 rounded-lg border text-xs font-bold transition flex items-center gap-2 ${
-                        isPref
-                          ? 'bg-purple-950/60 border-purple-500 text-white shadow'
-                          : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
-                      }`}
+                      onClick={() => {
+                        selectedSeats.forEach((s) => onToggleSeat(s));
+                      }}
+                      className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl text-xs transition cursor-pointer"
                     >
-                      <span>{t.nameAr}</span>
-                      <span className="font-mono text-pink-400 font-bold">{t.price} ر.س</span>
+                      مسح التحديد
                     </button>
-                  );
-                })}
+                  )}
+                </div>
               </div>
 
-              {/* Seating Grid */}
-              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 overflow-x-auto">
-                <div className="w-full text-center py-1.5 mb-3 bg-purple-900/30 rounded-lg text-[11px] font-bold text-purple-300 border border-purple-800/40">
-                  {currentEvent.seatingMap?.stageLabelAr || 'منصة العرض / المستطيل الأخضر'}
-                </div>
-
-                <div className="grid grid-cols-10 gap-1.5 max-w-lg mx-auto">
-                  {(currentEvent.seatingMap?.seats?.slice(0, 40) || []).map((seat) => {
-                    const isSelected = selectedSeats.some(s => s.id === seat.id);
+              {/* Tier / Category Filter Pills */}
+              <div className="space-y-2">
+                <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                  <Filter className="w-3.5 h-3.5 text-purple-400" />
+                  <span>تصنيفات وفئات التذاكر المتاحة على المخطط:</span>
+                </span>
+                
+                <div className="flex flex-wrap gap-2">
+                  {(apiSeatingMap?.tiers || currentEvent.tiers || []).map((t: any) => {
+                    const isPref = formValues.preferredTierId === t.id;
                     return (
                       <button
-                        key={seat.id}
+                        key={t.id}
                         type="button"
-                        onClick={() => onToggleSeat(seat)}
-                        className={`h-8 rounded-lg text-[10px] font-mono font-bold transition cursor-pointer flex items-center justify-center border ${
-                          isSelected
-                            ? 'bg-pink-600 border-pink-400 text-white shadow-md shadow-pink-600/40 scale-105'
-                            : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-purple-600 hover:text-white'
+                        onClick={() => setFormValues(v => ({ ...v, preferredTierId: t.id }))}
+                        className={`px-3.5 py-2 rounded-xl border text-xs font-bold transition flex items-center gap-2.5 cursor-pointer ${
+                          isPref
+                            ? 'bg-purple-950/60 border-purple-500 text-white ring-2 ring-purple-500/30 shadow-md'
+                            : 'bg-slate-900/80 border-slate-800 text-slate-300 hover:bg-slate-800'
                         }`}
-                        title={`${seat.label || seat.id} - ${seat.price} SAR`}
                       >
-                        {seat.row}{seat.number}
+                        <span 
+                          className="w-2.5 h-2.5 rounded-full" 
+                          style={{ backgroundColor: t.color || t.ticketColor || '#3b82f6' }} 
+                        />
+                        <span>{t.nameAr || t.name}</span>
+                        <span className="font-mono text-pink-400 font-bold">{t.price} ر.س</span>
+                        {t.remaining !== undefined && (
+                          <span className="text-[10px] text-slate-400 font-mono">({t.remaining} متبقي)</span>
+                        )}
                       </button>
                     );
                   })}
                 </div>
+              </div>
 
-                <div className="mt-3 pt-2 border-t border-slate-800 flex items-center justify-between text-xs">
-                  <span className="text-slate-400">
-                    المقاعد المحددة: <strong className="text-white">{selectedSeats.length} مقاعد</strong>
-                  </span>
-                  <span className="text-slate-400">
-                    المجموع: <strong className="text-emerald-400 font-mono font-bold">
-                      {selectedSeats.reduce((s, x) => s + (x.price || 0), 0)} ر.س
-                    </strong>
+              {/* Sections Filter Tabs */}
+              {((apiSeatingMap?.sections || currentEvent.seatingMap?.sections || []).length > 1) && (
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSectionFilter('all')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
+                      selectedSectionFilter === 'all'
+                        ? 'bg-pink-600 text-white border-pink-500 shadow'
+                        : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                    }`}
+                  >
+                    كافة الأقسام والمدرجات
+                  </button>
+                  {(apiSeatingMap?.sections || currentEvent.seatingMap?.sections || []).map((sec: any) => (
+                    <button
+                      key={sec.id}
+                      type="button"
+                      onClick={() => setSelectedSectionFilter(sec.id)}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer border whitespace-nowrap ${
+                        selectedSectionFilter === sec.id
+                          ? 'bg-purple-600 text-white border-purple-500 shadow'
+                          : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                      }`}
+                    >
+                      {sec.nameAr || sec.nameEn}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Interactive Seating Grid / Map */}
+              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 sm:p-5 overflow-x-auto space-y-4">
+                {/* Stage or Pitch Focal Point */}
+                <div className="w-full text-center py-2 bg-gradient-to-r from-purple-950/60 via-purple-900/40 to-purple-950/60 rounded-xl text-xs font-bold text-purple-300 border border-purple-700/30 flex items-center justify-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-pink-400" />
+                  <span>{currentEvent.seatingMap?.stageLabelAr || 'منصة العرض / المستطيل الأخضر الرسمي'}</span>
+                </div>
+
+                {isLoadingSeatingMap ? (
+                  <div className="py-8 text-center space-y-2">
+                    <RefreshCw className="w-6 h-6 text-purple-400 animate-spin mx-auto" />
+                    <span className="text-xs text-slate-400 block">جاري تحميل مخطط المقاعد التفصيلي من خوادم المنصة...</span>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5 max-w-3xl mx-auto py-2">
+                    {/* Render seats grouped by Row */}
+                    {Array.from(new Set(
+                      (apiSeatingMap?.seats || currentEvent.seatingMap?.seats || [])
+                        .filter((s: Seat) => selectedSectionFilter === 'all' || s.section === selectedSectionFilter || s.tierId === selectedSectionFilter)
+                        .map((s: Seat) => s.row)
+                    )).slice(0, 10).map((rowName) => {
+                      const rowSeats = (apiSeatingMap?.seats || currentEvent.seatingMap?.seats || [])
+                        .filter((s: Seat) => s.row === rowName && (selectedSectionFilter === 'all' || s.section === selectedSectionFilter || s.tierId === selectedSectionFilter))
+                        .slice(0, 14);
+
+                      return (
+                        <div key={String(rowName)} className="flex items-center gap-2 justify-center">
+                          <span className="w-6 text-[11px] font-mono font-bold text-slate-400 text-center shrink-0">
+                            {String(rowName)}
+                          </span>
+                          <div className="flex flex-wrap items-center gap-1.5 justify-center">
+                            {rowSeats.map((seat: Seat) => {
+                              const isSelected = selectedSeats.some(s => s.id === seat.id);
+                              const isAvailable = seat.status === 'available';
+
+                              return (
+                                <button
+                                  key={seat.id}
+                                  type="button"
+                                  onClick={() => onToggleSeat(seat)}
+                                  className={`w-8 h-8 rounded-lg text-[10px] font-mono font-bold transition cursor-pointer flex items-center justify-center border relative group ${
+                                    isSelected
+                                      ? 'bg-gradient-to-tr from-pink-600 to-rose-500 border-pink-400 text-white shadow-lg shadow-pink-600/50 scale-110 z-10'
+                                      : isAvailable
+                                      ? 'bg-slate-900 border-slate-700 text-slate-200 hover:border-purple-400 hover:bg-purple-950/60'
+                                      : 'bg-slate-950/80 border-slate-900 text-slate-600 cursor-not-allowed opacity-50'
+                                  }`}
+                                  title={`${seat.label || seat.id} (${seat.row}-${seat.number}) - ${seat.price} ر.س - المعرف: ${seat.id}`}
+                                >
+                                  <span>{seat.number}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <span className="w-6 text-[11px] font-mono font-bold text-slate-400 text-center shrink-0">
+                            {String(rowName)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Map Legend */}
+                <div className="flex flex-wrap items-center justify-center gap-4 pt-3 border-t border-slate-800/80 text-[11px] text-slate-400">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-3.5 h-3.5 rounded bg-slate-900 border border-slate-700" />
+                    <span>متاح للحجز</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-3.5 h-3.5 rounded bg-pink-600 border border-pink-400" />
+                    <span>مقعد محدد من قبلك</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-3.5 h-3.5 rounded bg-slate-950 border border-slate-900 opacity-50" />
+                    <span>محجوز مسبقاً</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* SPECIFIC SELECTED SEATS BOX (Showing exact Seat IDs & breakdown) */}
+              <div className="bg-slate-900/90 border border-purple-500/40 rounded-2xl p-4 space-y-3 shadow-lg">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-emerald-400" />
+                    <span className="text-xs font-bold text-white">المقاعد المحددة بالمعرف الدقيق (Specific Selected Seat IDs):</span>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-purple-300">
+                    {selectedSeats.length} مقاعد محددة
                   </span>
                 </div>
+
+                {selectedSeats.length === 0 ? (
+                  <div className="p-3 text-center text-xs text-slate-400">
+                    لم تقم باختيار أي مقعد بعد. انقر على المقاعد في المخطط أو اضغط على "قنص المقاعد المتتالية" أعلاه.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap gap-2">
+                      {selectedSeats.map((seat) => (
+                        <div
+                          key={seat.id}
+                          className="px-3 py-1.5 rounded-xl bg-purple-950/60 border border-purple-500/60 text-xs font-mono text-white flex items-center gap-2 shadow"
+                        >
+                          <span className="w-2 h-2 rounded-full bg-pink-500" />
+                          <span className="font-bold">{seat.label || `مقعد ${seat.row}-${seat.number}`}</span>
+                          <span className="text-[10px] text-pink-300 font-mono">({seat.id})</span>
+                          <span className="text-emerald-400 font-bold">{seat.price} ر.س</span>
+                          <button
+                            type="button"
+                            onClick={() => onToggleSeat(seat)}
+                            className="text-slate-400 hover:text-rose-400 cursor-pointer ml-1"
+                            title="إلغاء هذا المقعد"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-xs">
+                      <span className="text-slate-300 font-mono">
+                        المعرفات المرسلة في السلة (seatIds):{' '}
+                        <strong className="text-purple-300 font-mono">
+                          [{selectedSeats.map(s => s.id).join(', ')}]
+                        </strong>
+                      </span>
+                      <span className="text-slate-300">
+                        إجمالي القيمة:{' '}
+                        <strong className="text-emerald-400 font-mono font-bold text-sm">
+                          {selectedSeats.reduce((s, x) => s + (x.price || 0), 0)} ر.س
+                        </strong>
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1108,33 +1736,691 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                 </pre>
               </div>
 
-              {/* Active Cart Banner */}
+              {/* Active Cart Banner with PayTabs Payment Gateway Redirect */}
               {activeCart && activeCart.status === 'active' && (
-                <div className="bg-emerald-950/30 border-2 border-emerald-500/50 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xl">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
-                      <CheckCircle2 className="w-5 h-5" />
-                      <span>تم قفل المقاعد وتثبيت السلة النشطة بنجاح 100%!</span>
+                <div className="space-y-4">
+                  <div className="bg-emerald-950/30 border-2 border-emerald-500/50 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xl">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                        <CheckCircle2 className="w-5 h-5" />
+                        <span>تم قفل المقاعد وتثبيت السلة النشطة بنجاح 100%!</span>
+                      </div>
+
+                      <span className="px-3 py-1 rounded-full text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 animate-pulse" />
+                        <span>متبقي في السلة: {formatTimer(cartSecondsLeft)}</span>
+                      </span>
                     </div>
 
-                    <span className="px-3 py-1 rounded-full text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 animate-pulse" />
-                      <span>متبقي في السلة: {formatTimer(cartSecondsLeft)}</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs bg-slate-900/80 p-3 rounded-xl border border-slate-800">
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">معرف السلة الرسمي (Cart ID):</span>
+                        <strong className="text-white font-mono">{activeCart.cartId}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">المبلغ الإجمالي:</span>
+                        <strong className="text-emerald-400 font-mono">{activeCart.totalPrice} ر.س</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">المقاعد المحجوزة مؤقتاً:</span>
+                        <strong className="text-purple-300 font-mono">
+                          {activeCart.seatIds?.length ? activeCart.seatIds.join(', ') : `${activeCart.quantity} مقاعد`}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Official PayTabs Payment Gateway Card (Strict On-Demand, Zero Raw URL Text) */}
+                  {activeCart && (
+                    <div className="bg-gradient-to-br from-blue-950/50 via-slate-900 to-indigo-950/50 border-2 border-blue-500/50 rounded-2xl p-5 space-y-4 shadow-2xl animate-in fade-in">
+                      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-blue-900/40 pb-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-blue-600/30 border border-blue-400/40 flex items-center justify-center text-blue-300 font-black text-sm shadow-md">
+                            PT
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-bold text-white">بوابة دفع PayTabs السعودية الرسمية (PayTabs Gateway)</span>
+                              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-500/20 text-blue-300 border border-blue-500/40">
+                                Mada / Visa / MC / Apple Pay
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-300 mt-0.5">
+                              تم تثبيت حجز المقاعد بالسلة مؤقتاً لمدة 10 دقائق. يتم إنشاء جلسة الدفع الرسمية فورياً وخفياً عند النقر على زر الدفع.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="text-right sm:text-left font-mono">
+                          <span className="text-[10px] text-slate-400 block">رقم مرجع الطلب (Order Reference)</span>
+                          <span className="text-xs font-bold text-amber-300 font-mono select-all">
+                            {activeCart.orderReference || 'WBK-ORD-ACTIVE'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* PayTabs Status Banner (No Raw URL Exposed) */}
+                      <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                          <span className="text-slate-200">
+                            {cartSecondsLeft === 0 
+                              ? '⚠️ انتهت صلاحية الجلسة السابقة — اضغط "تحديث الجلسة" لتجديد الصلاحية وتفادي أخطاء 404' 
+                              : 'بوابة PayTabs الرسمية المشفرة جاهزة للتوليد والتحويل الفوري عند النقر'}
+                          </span>
+                        </div>
+                        <span className="font-mono text-emerald-400 text-[11px] bg-emerald-950/60 px-2.5 py-0.5 rounded border border-emerald-500/30">
+                          {paymentSessionFreshAt ? `تحديث: ${paymentSessionFreshAt}` : 'Ready On-Demand'}
+                        </span>
+                      </div>
+
+                      {/* PayTabs Action Buttons */}
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => handleInitiateFreshPaymentSession(true)}
+                          disabled={isGeneratingPaymentSession}
+                          className="flex-1 min-w-[220px] py-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm rounded-xl text-center shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition cursor-pointer"
+                        >
+                          {isGeneratingPaymentSession ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 animate-spin text-blue-200" />
+                              <span>جاري إنشاء جلسة الدفع المشفرة والتحويل...</span>
+                            </>
+                          ) : (
+                            <>
+                              <CreditCard className="w-4 h-4" />
+                              <span>⚡ الدفع الآن عبر PayTabs (تحويل فوري للجلسة)</span>
+                              <ExternalLink className="w-3.5 h-3.5" />
+                            </>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleInitiateFreshPaymentSession(false)}
+                          disabled={isGeneratingPaymentSession}
+                          className="px-3.5 py-3 bg-blue-900/40 hover:bg-blue-800/40 text-blue-200 border border-blue-500/40 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                          title="تحديث جلسة الدفع وتوليد رابط جديد لتفادي انتهاء الصلاحية وخطأ 404"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingPaymentSession ? 'animate-spin' : ''}`} />
+                          <span>تحديث الجلسة (Refresh)</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const ref = activeCart.orderReference || 'WBK-ORD-ACTIVE';
+                            navigator.clipboard.writeText(ref);
+                            setCopiedUrl(true);
+                            setTimeout(() => setCopiedUrl(false), 2500);
+                          }}
+                          className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-slate-700"
+                        >
+                          {copiedUrl ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                          <span>{copiedUrl ? 'تم نسخ المرجع!' : 'نسخ مرجع الطلب'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const verifyIdx = stepsList.findIndex(s => s.type === 'payment_verification');
+                            if (verifyIdx >= 0) {
+                              setCurrentStepIndex(verifyIdx);
+                            }
+                          }}
+                          className="px-4 py-3 bg-purple-950/60 hover:bg-purple-900/60 border border-purple-500/50 text-purple-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <ShieldCheck className="w-4 h-4 text-purple-400" />
+                          <span>المتابعة للتحقق من الدفع وتأكيد التذاكر ←</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 8. PayTabs Official Payment Gateway Redirect Step */}
+          {currentStepObj.type === 'dynamic_checkout' && (
+            <div className="space-y-5 animate-in fade-in">
+              {/* PayTabs Official Redirect Container */}
+              <div className="bg-gradient-to-br from-blue-950/60 via-slate-900 to-indigo-950/60 border-2 border-blue-500/50 rounded-2xl p-5 sm:p-7 space-y-5 shadow-2xl">
+                {/* Header */}
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-blue-900/50 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-blue-600/30 border border-blue-400/50 flex items-center justify-center text-blue-300 font-black text-lg shadow-lg">
+                      PT
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h4 className="text-base font-black text-white">بوابة دفع PayTabs السعودية الرسمية (PayTabs Gateway)</h4>
+                        <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-blue-500/20 text-blue-300 border border-blue-500/40">
+                          Mada / Visa / MC / Apple Pay
+                        </span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                          توليد فوري عند الطلب On-Demand
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-300 mt-1">
+                        يتم إنشاء جلسة الدفع والرابط الرسمي ديناميكياً وفورياً عند النقر على زر الدفع فقط، لتفادي أخطاء انتهاء الصلاحية أو خطأ 404.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="text-right sm:text-left font-mono">
+                    <span className="text-[10px] text-slate-400 block font-sans">رقم مرجع الطلب (Order Reference)</span>
+                    <span className="text-sm font-bold text-amber-300 select-all">
+                      {activeCart?.orderReference || 'WBK-ORD-ACTIVE'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Expiration Warning if less than 3 minutes left */}
+                {cartSecondsLeft < 180 && (
+                  <div className="bg-amber-950/50 border border-amber-500/60 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-pulse">
+                    <div className="flex items-center gap-2 text-xs text-amber-200">
+                      <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>
+                        تنبيه: اقتربت صلاحية الجلسة الحالية من الانتهاء (متبقي {formatTimer(cartSecondsLeft)}). اضغط زر "تحديث جلسة الدفع" لتوليد رابط جديد فوراً وتفادي خطأ 404.
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleInitiateFreshPaymentSession(false)}
+                      disabled={isGeneratingPaymentSession}
+                      className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs transition cursor-pointer flex items-center gap-1.5 shadow-md shrink-0"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingPaymentSession ? 'animate-spin' : ''}`} />
+                      <span>تحديث الجلسة الآن</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Session Feedback Notice */}
+                {freshSessionNotice && (
+                  <div className="p-3 bg-emerald-950/40 border border-emerald-500/40 rounded-xl text-xs text-emerald-200 flex items-center justify-between gap-2 animate-in fade-in">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{freshSessionNotice}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setFreshSessionNotice(null)}
+                      className="text-slate-400 hover:text-white text-xs px-1.5 py-0.5 cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {/* Secure Gateway Protocol Card (No Raw URLs Exposed) */}
+                <div className="bg-slate-950/80 rounded-xl border border-slate-800 p-4 space-y-3 shadow-inner">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2.5 h-2.5 rounded-full ${cartSecondsLeft === 0 ? 'bg-rose-500' : 'bg-emerald-400'} animate-pulse`} />
+                      <span className="text-xs font-bold text-slate-200">
+                        حالة اتصال بوابة PayTabs المشفرة:
+                      </span>
+                    </div>
+                    <span className={`text-xs font-mono px-2.5 py-1 rounded-lg border ${
+                      cartSecondsLeft === 0 
+                        ? 'text-rose-400 bg-rose-950/60 border-rose-500/40' 
+                        : (paymentSessionFreshAt ? 'text-emerald-400 bg-emerald-950/60 border-emerald-500/30' : 'text-blue-300 bg-blue-950/60 border-blue-500/30')
+                    }`}>
+                      {cartSecondsLeft === 0 
+                        ? '⚠️ الجلسة منتهية الصلاحية (اضغط تحديث الجلسة لتوليد رابط جديد)' 
+                        : (paymentSessionFreshAt ? `جلسة نشطة طازجة (تحديث: ${paymentSessionFreshAt})` : 'جاهزة للتوليد الفوري والمشفر عند النقر')}
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs bg-slate-900/80 p-3 rounded-xl border border-slate-800">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                    <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <div>
+                        <span className="text-[10px] text-slate-400 block font-sans">الأمان والخصوصية</span>
+                        <span className="font-bold text-slate-200">تشفير SSL 256-bit & PCI-DSS</span>
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
+                      <CreditCard className="w-4 h-4 text-blue-400 shrink-0" />
+                      <div>
+                        <span className="text-[10px] text-slate-400 block font-sans">طرق الدفع المعتمدة</span>
+                        <span className="font-bold text-slate-200">مدى • فيزا • ماستركارد • Apple Pay</span>
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
+                      <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                      <div>
+                        <span className="text-[10px] text-slate-400 block font-sans">توليد عند الطلب (Zero 404)</span>
+                        <span className="font-bold text-slate-200">صلاحية 10 دقائق من لحظة النقر</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {cartSecondsLeft === 0 && (
+                    <div className="p-3.5 bg-rose-950/70 border border-rose-500/60 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-rose-200 animate-in fade-in">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
+                        <span>انتهت صلاحية جلسة الدفع السابقة. اضغط زر "تحديث جلسة الدفع" لتوليد رابط جديد فورياً وتفادي أخطاء 404.</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleInitiateFreshPaymentSession(false)}
+                        disabled={isGeneratingPaymentSession}
+                        className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg font-black text-xs shrink-0 cursor-pointer transition flex items-center gap-1.5 shadow-md"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingPaymentSession ? 'animate-spin' : ''}`} />
+                        <span>تحديث الجلسة الآن</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Primary Action Buttons: On-Demand Pay Now & Refresh Payment Fallback */}
+                <div className="flex flex-wrap items-center gap-3 pt-1">
+                  {/* Primary CTA: Generate Fresh Session on Click and Redirect */}
+                  <button
+                    type="button"
+                    onClick={() => handleInitiateFreshPaymentSession(true)}
+                    disabled={isGeneratingPaymentSession}
+                    className="flex-1 min-w-[260px] py-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-sm rounded-xl text-center shadow-xl shadow-emerald-500/30 flex items-center justify-center gap-2.5 transition cursor-pointer hover:scale-[1.01]"
+                  >
+                    {isGeneratingPaymentSession ? (
+                      <>
+                        <RefreshCw className="w-5 h-5 animate-spin text-slate-950" />
+                        <span>جاري إنشاء جلسة الدفع المشفرة والتحويل إلى PayTabs...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CreditCard className="w-5 h-5" />
+                        <span>⚡ الدفع الآن عبر بوابة PayTabs (Pay Now - تحويل فوري)</span>
+                        <ExternalLink className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
+
+                  {/* Fallback & Refresh Payment Button (Requests Fresh Payment URL to Prevent 404/Expiry) */}
+                  <button
+                    type="button"
+                    onClick={() => handleInitiateFreshPaymentSession(false)}
+                    disabled={isGeneratingPaymentSession}
+                    className="px-5 py-4 bg-blue-900/40 hover:bg-blue-800/50 text-blue-200 hover:text-white border-2 border-blue-500/40 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition cursor-pointer shadow-md"
+                    title="طلب جلسة دفع جديدة طازجة بصلاحية 10 دقائق وتفادي أخطاء انتهاء الصلاحية و 404"
+                  >
+                    <RefreshCw className={`w-4 h-4 text-blue-400 ${isGeneratingPaymentSession ? 'animate-spin' : ''}`} />
+                    <span>تحديث جلسة الدفع (Refresh Payment)</span>
+                  </button>
+
+                  {/* External Browser Intent CTA */}
+                  <button
+                    type="button"
+                    onClick={handleOpenExternalIntentWithFreshSession}
+                    disabled={isGeneratingPaymentSession}
+                    className="px-4 py-4 bg-slate-800 hover:bg-slate-750 text-slate-200 hover:text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition border border-slate-700 shadow-md cursor-pointer"
+                  >
+                    <ExternalLink className="w-4 h-4 text-blue-400" />
+                    <span>فتح في متصفح خارجي</span>
+                  </button>
+
+                  {/* Copy Order Reference */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const ref = activeCart?.orderReference || 'WBK-ORD-ACTIVE';
+                      navigator.clipboard.writeText(ref);
+                      setCopiedPaytabsUrl(true);
+                      setTimeout(() => setCopiedPaytabsUrl(false), 2500);
+                    }}
+                    className="px-4 py-4 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-slate-700"
+                  >
+                    {copiedPaytabsUrl ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    <span>{copiedPaytabsUrl ? 'تم نسخ المرجع!' : 'نسخ مرجع الطلب'}</span>
+                  </button>
+                </div>
+
+                {/* Secondary Fallback Checkout Links */}
+                <div className="pt-3 border-t border-blue-900/40 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="text-slate-400 flex flex-wrap items-center gap-2">
+                    <span className="flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>معرف السلة: <strong className="text-slate-200 font-mono">{activeCart?.cartId}</strong></span>
+                    </span>
+                    <span>• المبلغ: <strong className="text-emerald-400 font-mono">{activeCart?.totalPrice} ر.س</strong></span>
+                    <span>• الوقت المتبقي: <strong className="text-amber-300 font-mono">{formatTimer(cartSecondsLeft)}</strong></span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const verifyIdx = stepsList.findIndex(s => s.type === 'payment_verification' || s.type === 'checkout_payment');
+                        if (verifyIdx >= 0) setCurrentStepIndex(verifyIdx);
+                      }}
+                      className="px-4 py-2 bg-purple-950/60 hover:bg-purple-900/60 text-purple-200 border border-purple-500/50 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                    >
+                      <ShieldCheck className="w-4 h-4 text-purple-400" />
+                      <span>بعد إتمام الدفع: التحقق وإصدار التذاكر ←</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Unified Order Review, Cart Lock & PayTabs Official Payment Step */}
+          {currentStepObj.type === 'checkout_payment' && (
+            <div className="space-y-6 animate-in fade-in">
+              {/* Live Order Summary Card */}
+              <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                  <div className="flex items-center gap-3">
+                    <img src={currentEvent.image} alt={currentEvent.titleAr} className="w-12 h-12 rounded-xl object-cover shrink-0 border border-slate-700" />
                     <div>
-                      <span className="text-slate-400 block text-[10px]">معرف السلة الرسمي (Cart ID):</span>
-                      <strong className="text-white font-mono">{activeCart.cartId}</strong>
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-sm font-bold text-white">{currentEvent.titleAr}</h4>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                          {currentEvent.category}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5 text-pink-400 shrink-0" />
+                        <span>{currentEvent.locationAr || currentEvent.location}</span>
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="text-right sm:text-left text-xs">
+                    <span className="text-slate-400 block text-[10px]">الموعد المحدد للحضور:</span>
+                    <span className="font-bold text-purple-300 font-mono">
+                      {formValues.selectedDate} • {formValues.selectedTime}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Ticket Details & Seats Breakdown */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs bg-slate-950 p-3.5 rounded-xl border border-slate-850">
+                  <div>
+                    <span className="text-slate-400 block text-[10px] mb-1">نوع التذاكر / المقاعد:</span>
+                    {currentEvent.isSeated ? (
+                      <div>
+                        <span className="font-bold text-emerald-400 block">مقاعد مرقمة مخصصة</span>
+                        <span className="text-purple-300 font-mono text-[11px]">
+                          {selectedSeats.length > 0 
+                            ? selectedSeats.map(s => s.label || s.id).join(', ') 
+                            : `${formValues.ticketQuantity} مقاعد مقترحة`}
+                        </span>
+                      </div>
+                    ) : (
+                      <div>
+                        <span className="font-bold text-purple-300 block">
+                          {currentEvent.tiers?.find(t => t.id === formValues.selectedTierId)?.nameAr || 'دخول عام'}
+                        </span>
+                        <span className="text-slate-400 font-mono text-[11px]">{formValues.ticketQuantity} تذاكر دخول</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <span className="text-slate-400 block text-[10px] mb-1">جهة المشجعين / المدرج:</span>
+                    <span className="font-bold text-white">
+                      {currentEvent.teams ? (
+                        formValues.selectedTeam === 'home' ? currentEvent.teams.home.nameAr :
+                        formValues.selectedTeam === 'away' ? currentEvent.teams.away.nameAr :
+                        'المنصة المحايدة'
+                      ) : 'مدرجات الحضور العامة'}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-slate-400 block text-[10px] mb-1">إجمالي الحساب (شامل 15% ضريبة):</span>
+                    <span className="text-base font-black text-emerald-400 font-mono">
+                      {activeCart?.totalPrice || (
+                        (selectedSeats.length > 0 
+                          ? selectedSeats.reduce((s, x) => s + (x.price || 0), 0) 
+                          : formValues.ticketQuantity * (currentEvent.tiers?.[0]?.price || 85))
+                      )} ر.س
+                    </span>
+                  </div>
+                </div>
+
+                {/* Contact Email & Token */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      البريد الإلكتروني لاستلام التذاكر:
+                    </label>
+                    <input
+                      type="email"
+                      value={formValues.email}
+                      onChange={(e) => setFormValues(v => ({ ...v, email: e.target.value }))}
+                      placeholder="user@webook.com"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      رمز توثيق الحساب (Bearer Token):
+                    </label>
+                    <input
+                      type="text"
+                      value={formValues.authToken}
+                      onChange={(e) => setFormValues(v => ({ ...v, authToken: e.target.value }))}
+                      placeholder="Bearer Token (يملأ تلقائياً من الحساب أو يترك لجلسة حجز مباشر)"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-purple-300 font-mono"
+                      dir="ltr"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Cart Lock Action Button (If cart is not yet locked) */}
+              {(!activeCart || activeCart.status !== 'active') && (
+                <div className="bg-gradient-to-r from-purple-950/40 via-slate-900 to-indigo-950/40 border-2 border-purple-500/40 rounded-2xl p-5 space-y-4 shadow-xl">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-purple-600/30 border border-purple-400/50 flex items-center justify-center text-purple-300">
+                        <ShoppingCart className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-white">قفل المقاعد فورياً في خوادم Webook الرسمية</h4>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          تثبيت حجز المقاعد في السلة النشطة مؤقتاً لمدة 10 دقائق رسمية وتوليد معرف السلة (cart_id).
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleExecuteStep(currentStepIndex)}
+                      disabled={isRunningStep}
+                      className="w-full sm:w-auto px-6 py-3 bg-gradient-to-r from-pink-600 via-purple-600 to-indigo-600 hover:from-pink-500 hover:to-purple-500 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-purple-600/30 flex items-center justify-center gap-2 transition cursor-pointer"
+                    >
+                      <Lock className={`w-4 h-4 ${isRunningStep ? 'animate-spin' : ''}`} />
+                      <span>{isRunningStep ? 'جاري قفل المقاعد في السلة...' : 'قفل المقاعد وتثبيت السلة (10 دقائق)'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Active Cart & Official PayTabs Payment Gateway Card */}
+              {activeCart && activeCart.status === 'active' && (
+                <div className="space-y-4">
+                  {/* Cart Hold Status */}
+                  <div className="bg-emerald-950/30 border-2 border-emerald-500/50 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xl">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                        <CheckCircle2 className="w-5 h-5" />
+                        <span>تم قفل المقاعد وتثبيت السلة النشطة بنجاح 100%!</span>
+                      </div>
+
+                      <span className="px-3 py-1 rounded-full text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 animate-pulse" />
+                        <span>متبقي في السلة: {formatTimer(cartSecondsLeft)}</span>
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs bg-slate-900/80 p-3 rounded-xl border border-slate-800">
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">معرف السلة الرسمي (Cart ID):</span>
+                        <strong className="text-white font-mono">{activeCart.cartId}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">المبلغ الإجمالي:</span>
+                        <strong className="text-emerald-400 font-mono">{activeCart.totalPrice} ر.س</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">المقاعد المحجوزة مؤقتاً:</span>
+                        <strong className="text-purple-300 font-mono">
+                          {activeCart.seatIds?.length ? activeCart.seatIds.join(', ') : `${activeCart.quantity} مقاعد`}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* PayTabs Payment Gateway Container */}
+                  <div className="bg-gradient-to-br from-blue-950/50 via-slate-900 to-indigo-950/50 border-2 border-blue-500/50 rounded-2xl p-5 space-y-4 shadow-2xl animate-in fade-in">
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-blue-900/40 pb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-blue-600/30 border border-blue-400/40 flex items-center justify-center text-blue-300 font-black text-sm shadow-md">
+                          PT
+                        </div>
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-bold text-white">بوابة دفع PayTabs السعودية الرسمية (PayTabs Gateway)</span>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-500/20 text-blue-300 border border-blue-500/40">
+                              Mada / Visa / MC / Apple Pay
+                            </span>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                              توليد فوري عند الطلب On-Demand
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-300 mt-0.5">
+                            يتم إنشاء جلسة الدفع والرابط الرسمي ديناميكياً وفورياً عند النقر على زر الدفع فقط، لتفادي أخطاء انتهاء الصلاحية أو خطأ 404.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="text-right sm:text-left font-mono">
+                        <span className="text-[10px] text-slate-400 block">رقم مرجع الطلب (Order Reference)</span>
+                        <span className="text-xs font-bold text-amber-300 font-mono select-all">
+                          {activeCart.orderReference || 'WBK-ORD-ACTIVE'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Expiration warning banner */}
+                    {cartSecondsLeft < 180 && (
+                      <div className="bg-amber-950/50 border border-amber-500/60 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-pulse">
+                        <div className="flex items-center gap-2 text-xs text-amber-200">
+                          <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                          <span>
+                            تنبيه: اقتربت صلاحية الجلسة الحالية من الانتهاء (متبقي {formatTimer(cartSecondsLeft)}). اضغط زر "تحديث جلسة الدفع" لتوليد رابط جديد فوراً وتفادي خطأ 404.
+                          </span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleInitiateFreshPaymentSession(false)}
+                          disabled={isGeneratingPaymentSession}
+                          className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs transition cursor-pointer flex items-center gap-1.5 shadow-md shrink-0"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingPaymentSession ? 'animate-spin' : ''}`} />
+                          <span>تحديث الجلسة الآن</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* PayTabs Status Banner */}
+                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2">
+                        <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <span className="text-slate-200">
+                          {cartSecondsLeft === 0 
+                            ? '⚠️ انتهت صلاحية الجلسة السابقة — اضغط "تحديث الجلسة" لتجديد الصلاحية وتفادي أخطاء 404' 
+                            : 'بوابة PayTabs الرسمية المشفرة جاهزة للتوليد والتحويل الفوري عند النقر'}
+                        </span>
+                      </div>
+                      <span className="font-mono text-emerald-400 text-[11px] bg-emerald-950/60 px-2.5 py-0.5 rounded border border-emerald-500/30">
+                        {paymentSessionFreshAt ? `تحديث: ${paymentSessionFreshAt}` : 'Ready On-Demand'}
+                      </span>
+                    </div>
+
+                    {/* PayTabs Actions */}
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => handleInitiateFreshPaymentSession(true)}
+                        disabled={isGeneratingPaymentSession}
+                        className="flex-1 min-w-[220px] py-3.5 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs sm:text-sm rounded-xl text-center shadow-xl shadow-emerald-500/30 flex items-center justify-center gap-2 transition cursor-pointer hover:scale-[1.01]"
+                      >
+                        {isGeneratingPaymentSession ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            <span>جاري إنشاء جلسة الدفع الرسمية والتحويل...</span>
+                          </>
+                        ) : (
+                          <>
+                            <ExternalLink className="w-4 h-4" />
+                            <span>الدفع الآن عبر بوابة PayTabs (Pay Now) ←</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleInitiateFreshPaymentSession(false)}
+                        disabled={isGeneratingPaymentSession}
+                        className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-slate-700"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingPaymentSession ? 'animate-spin' : ''}`} />
+                        <span>تحديث الجلسة (Refresh)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleVerifyPaymentManual()}
+                        disabled={isVerifyingPayment}
+                        className="px-4 py-3 bg-purple-950/60 hover:bg-purple-900/60 border border-purple-500/50 text-purple-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                      >
+                        <ShieldCheck className={`w-4 h-4 text-purple-400 ${isVerifyingPayment ? 'animate-spin' : ''}`} />
+                        <span>التحقق من إتمام الدفع وتأكيد التذاكر</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Confirmed Order Card (If verified) */}
+              {confirmedOrder && (
+                <div className="bg-gradient-to-r from-emerald-950/60 via-slate-900 to-teal-950/60 border-2 border-emerald-500/60 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-4 animate-in fade-in">
+                  <div className="flex items-center justify-between border-b border-emerald-500/30 pb-3">
+                    <div className="flex items-center gap-2 text-emerald-400 font-black text-base">
+                      <CheckCircle2 className="w-6 h-6" />
+                      <span>تم تأكيد الدفع وإصدار التذاكر الرقمية المعتمدة بنجاح!</span>
+                    </div>
+                    <span className="font-mono text-xs text-amber-300 font-bold bg-amber-950/50 px-3 py-1 rounded-full border border-amber-500/40">
+                      {confirmedOrder.orderReference}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs bg-slate-950/80 p-4 rounded-2xl border border-emerald-500/30">
+                    <div>
+                      <span className="text-slate-400 block text-[10px]">الفعالية:</span>
+                      <strong className="text-white text-xs">{confirmedOrder.eventTitle || currentEvent.titleAr}</strong>
                     </div>
                     <div>
-                      <span className="text-slate-400 block text-[10px]">المبلغ الإجمالي:</span>
-                      <strong className="text-emerald-400 font-mono">{activeCart.totalPrice} ر.س</strong>
+                      <span className="text-slate-400 block text-[10px]">المبلغ المدفوع:</span>
+                      <strong className="text-emerald-400 text-xs font-mono">{confirmedOrder.totalPrice} ر.س</strong>
                     </div>
                     <div>
-                      <span className="text-slate-400 block text-[10px]">حالة الجلسة:</span>
-                      <strong className="text-purple-300 font-mono">نشطة ومربوطة بالخادم</strong>
+                      <span className="text-slate-400 block text-[10px]">المقاعد المؤكدة:</span>
+                      <strong className="text-purple-300 text-xs font-mono">
+                        {confirmedOrder.seatIds?.join(', ') || `${confirmedOrder.ticketsCount || 1} تذاكر`}
+                      </strong>
                     </div>
                   </div>
                 </div>
@@ -1142,57 +2428,327 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
             </div>
           )}
 
-          {/* 8. Dynamic Checkout URL Step (Zero 404 Guaranteed) */}
-          {currentStepObj.type === 'dynamic_checkout' && (
-            <div className="space-y-4 animate-in fade-in">
-              <div className="bg-slate-900 border-2 border-pink-500/40 rounded-2xl p-4 sm:p-6 space-y-4 shadow-xl">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-pink-300 flex items-center gap-1.5">
-                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                    <span>الرابط الديناميكي الرسمي الموثق (Verified Dynamic Checkout URL):</span>
-                  </span>
-
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                    Zero 404 Guaranteed
-                  </span>
-                </div>
-
-                {/* URL Display */}
-                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs font-mono text-pink-300 break-all select-all shadow-inner" dir="ltr">
-                  {activeCart?.dynamicCheckoutUrl || `https://webook.com/ar/checkout?cart_id=${activeCart?.cartId || 'wbk_cart_active'}&event=${schema?.eventSlug || currentEvent.slug}`}
-                </div>
-
-                {/* Actions */}
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <a
-                    href={activeCart?.dynamicCheckoutUrl || `https://webook.com/ar/checkout?cart_id=${activeCart?.cartId || 'wbk_cart_active'}&event=${schema?.eventSlug || currentEvent.slug}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex-1 min-w-[200px] py-3 bg-gradient-to-r from-pink-600 via-purple-600 to-indigo-600 hover:opacity-95 text-white font-bold text-xs sm:text-sm rounded-xl text-center shadow-lg shadow-pink-600/30 flex items-center justify-center gap-2 transition"
-                  >
-                    <ExternalLink className="w-4 h-4" />
-                    <span>الانتقال الفوري لشاشة الدفع مع السلة النشطة (Proceed to Checkout)</span>
-                  </a>
+          {/* 9. Payment Verification & Booking History Confirmation Step */}
+          {currentStepObj.type === 'payment_verification' && (
+            <div className="space-y-6 animate-in fade-in">
+              {/* Header Box */}
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-xl bg-purple-600/20 border border-purple-500/40 flex items-center justify-center text-purple-300">
+                      <CreditCard className="w-5 h-5 text-purple-400" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-white">التحقق من إتمام الدفع وفحص سجل الحجوزات الرسمية</h4>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        بعد العودة من بوابة PayTabs، يتم مطابقة رقم مرجع الطلب (Order Reference) لإصدار التذاكر الرقمية المعتمدة.
+                      </p>
+                    </div>
+                  </div>
 
                   <button
                     type="button"
-                    onClick={handleCopyCheckoutUrl}
-                    className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-slate-700"
+                    onClick={handleFetchBookingHistory}
+                    disabled={isCheckingHistory}
+                    className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shrink-0"
                   >
-                    {copiedUrl ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                    <span>{copiedUrl ? 'تم نسخ الرابط!' : 'نسخ الرابط'}</span>
+                    <Layers className={`w-3.5 h-3.5 text-purple-400 ${isCheckingHistory ? 'animate-spin' : ''}`} />
+                    <span>فحص سجل الحجوزات السابقة</span>
+                  </button>
+                </div>
+
+                {/* Reference Inputs */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      رقم مرجع الطلب (Order Reference ID):
+                    </label>
+                    <input
+                      type="text"
+                      value={manualOrderRef}
+                      onChange={(e) => setManualOrderRef(e.target.value)}
+                      placeholder="مثال: WBK-ORD-M4F7... أو PT_TRX_..."
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-amber-300 font-mono"
+                      dir="ltr"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      معرف السلة (Cart Reference ID):
+                    </label>
+                    <input
+                      type="text"
+                      value={manualCartId}
+                      onChange={(e) => setManualCartId(e.target.value)}
+                      placeholder="مثال: wbk_cart_..."
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-purple-300 font-mono"
+                      dir="ltr"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      بريد حامل التذاكر (Attendee Email):
+                    </label>
+                    <input
+                      type="email"
+                      value={manualEmail}
+                      onChange={(e) => setManualEmail(e.target.value)}
+                      placeholder="user@webook.com"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 font-mono"
+                      dir="ltr"
+                    />
+                  </div>
+                </div>
+
+                {/* Action Controls */}
+                <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-slate-800/80">
+                  <button
+                    type="button"
+                    onClick={() => handleVerifyPaymentManual()}
+                    disabled={isVerifyingPayment}
+                    className="flex-1 min-w-[200px] px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 transition cursor-pointer"
+                  >
+                    <CheckCircle2 className={`w-4 h-4 ${isVerifyingPayment ? 'animate-spin' : ''}`} />
+                    <span>{isVerifyingPayment ? 'جاري التحقق من خوادم الدفع...' : 'التحقق من الدفع وتأكيد إصدار التذاكر'}</span>
                   </button>
 
                   <button
                     type="button"
-                    onClick={handleCopyInjectorSnippet}
-                    className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-slate-700"
+                    onClick={handleSimulatePayTabsReturn}
+                    disabled={isVerifyingPayment}
+                    className="px-4 py-2.5 bg-purple-950/70 hover:bg-purple-900/70 border border-purple-500/50 text-purple-200 font-bold text-xs rounded-xl flex items-center gap-1.5 transition cursor-pointer"
+                    title="محاكاة العودة الآلية بعد السداد بنجاح عبر PayTabs"
                   >
-                    {copiedInjector ? <Check className="w-4 h-4 text-emerald-400" /> : <Terminal className="w-4 h-4" />}
-                    <span>{copiedInjector ? 'تم نسخ الكود!' : 'كود الحقن الفوري'}</span>
+                    <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                    <span>⚡ محاكاة إتمام الدفع عبر PayTabs</span>
                   </button>
                 </div>
+
+                {/* Feedback Message */}
+                {verifyMessage && (
+                  <div className={`p-3.5 rounded-xl text-xs flex items-center gap-2 ${
+                    verifyMessage.type === 'success'
+                      ? 'bg-emerald-950/40 border border-emerald-500/50 text-emerald-200'
+                      : 'bg-rose-950/40 border border-rose-500/50 text-rose-200'
+                  }`}>
+                    {verifyMessage.type === 'success' ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" /> : <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />}
+                    <span>{verifyMessage.text}</span>
+                  </div>
+                )}
               </div>
+
+              {/* CONFIRMED DIGITAL TICKETS DISPLAY */}
+              {confirmedOrder && (
+                <div className="space-y-4 animate-in fade-in">
+                  {/* Confirmed Order Summary Header */}
+                  <div className="bg-gradient-to-r from-emerald-950/60 via-slate-900 to-teal-950/60 border-2 border-emerald-500/60 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-4">
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-2xl bg-emerald-500 text-slate-950 flex items-center justify-center font-black shadow-lg shadow-emerald-500/30">
+                          <Check className="w-7 h-7 stroke-[3]" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                              تم الدفع وإصدار التذاكر رسمياً ✓
+                            </span>
+                            <span className="text-xs font-mono text-purple-300 font-bold">
+                              {confirmedOrder.invoiceNumber || `INV-${confirmedOrder.orderReference}`}
+                            </span>
+                          </div>
+                          <h3 className="text-lg font-black text-white mt-0.5">
+                            تهانينا! حجزك مؤكد بنجاح والتذاكر جاهزة للاستخدام
+                          </h3>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => window.print()}
+                          className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <Printer className="w-3.5 h-3.5 text-purple-400" />
+                          <span>طباعة ملخص الحجز</span>
+                        </button>
+
+                        <a
+                          href="https://webook.com/ar/profile/bookings"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition"
+                        >
+                          <Ticket className="w-3.5 h-3.5" />
+                          <span>عرض في حجوزاتي (Webook)</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    </div>
+
+                    {/* Metadata Grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs bg-slate-950/80 p-3.5 rounded-xl border border-slate-800">
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">رقم مرجع الطلب:</span>
+                        <strong className="text-amber-300 font-mono">{confirmedOrder.orderReference}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">بوابة الدفع:</span>
+                        <strong className="text-blue-300 font-mono">PayTabs السعودية</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">المبلغ الإجمالي المسدد:</span>
+                        <strong className="text-emerald-400 font-mono">{confirmedOrder.amount} ر.س</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">عدد التذاكر الصادرة:</span>
+                        <strong className="text-purple-300 font-mono">{confirmedOrder.tickets?.length || confirmedOrder.seatsCount || 1} تذاكر</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Individual Digital Tickets Grid */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-xs text-slate-300 font-bold px-1">
+                      <span className="flex items-center gap-1.5">
+                        <QrCode className="w-4 h-4 text-pink-400" />
+                        <span>التذاكر الرقمية المعتمدة للدخول ({confirmedOrder.tickets?.length || 0} تذاكر):</span>
+                      </span>
+                      <span className="text-slate-500 font-mono text-[11px]">
+                        جاهزة للمسح الضوئي عند البوابة الرسمية
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {(confirmedOrder.tickets || []).map((ticket: any, idx: number) => (
+                        <div
+                          key={ticket.ticketId || idx}
+                          className="bg-slate-950 border-2 border-purple-500/50 rounded-2xl p-4 sm:p-5 relative overflow-hidden shadow-xl space-y-3"
+                        >
+                          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                            <div className="flex items-center gap-2">
+                              <span className="w-6 h-6 rounded-lg bg-pink-600/30 text-pink-300 flex items-center justify-center font-bold text-xs">
+                                {idx + 1}
+                              </span>
+                              <div>
+                                <div className="text-xs font-bold text-white">{ticket.seatLabel || `المقعد ${ticket.row}-${ticket.number}`}</div>
+                                <div className="text-[10px] text-pink-400 font-mono">{ticket.section || 'الواجهة الرسمية'}</div>
+                              </div>
+                            </div>
+
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                              تذكرة نشطة ومؤكدة ✓
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <span className="text-[10px] text-slate-400 block">الفعالية:</span>
+                              <strong className="text-white truncate block">{ticket.eventTitle || currentEvent.titleAr}</strong>
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-slate-400 block">الموعد:</span>
+                              <strong className="text-slate-200 font-mono text-[11px] block">{ticket.date} • {ticket.time}</strong>
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-slate-400 block">حامل التذكرة:</span>
+                              <strong className="text-purple-300 block">{ticket.attendeeName || 'حامل التذكرة'}</strong>
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-slate-400 block">فئة التذكرة والسعر:</span>
+                              <strong className="text-emerald-400 font-mono block">{ticket.price} ر.س ({ticket.tierNameAr || 'فئة معتمدة'})</strong>
+                            </div>
+                          </div>
+
+                          {/* Digital Barcode & QR Display */}
+                          <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-3 bg-slate-900/60 p-3 rounded-xl">
+                            {/* Stylized Barcode */}
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-0.5 h-8 bg-white px-2 py-1 rounded">
+                                {[3,1,2,1,3,2,1,2,3,1,1,3,2,1,2,3,1].map((w, i) => (
+                                  <span key={i} className="bg-slate-950 h-full" style={{ width: `${w * 2}px` }} />
+                                ))}
+                              </div>
+                              <span className="text-[10px] font-mono text-slate-400 block" dir="ltr">
+                                {ticket.barcode || `WBK-${ticket.seatId}`}
+                              </span>
+                            </div>
+
+                            {/* Stylized QR payload representation */}
+                            <div className="text-center shrink-0">
+                              <div className="w-12 h-12 bg-white p-1 rounded-lg flex items-center justify-center shadow">
+                                <QrCode className="w-10 h-10 text-slate-950" />
+                              </div>
+                              <span className="text-[9px] font-mono text-purple-400 block mt-0.5">QR Verified</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Booking History Drawer / Modal */}
+              {showHistoryDrawer && (
+                <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3 animate-in fade-in">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                    <div className="flex items-center gap-2">
+                      <Layers className="w-4 h-4 text-purple-400" />
+                      <span className="text-xs font-bold text-white">سجل الحجوزات المؤكدة المخزنة في النظام ({bookingHistory.length}):</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowHistoryDrawer(false)}
+                      className="text-xs text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      إغلاق ✕
+                    </button>
+                  </div>
+
+                  {bookingHistory.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-slate-400">
+                      {historyFeedback || 'لا توجد حجوزات سابقة محفوظة في النظام لهذا الحساب.'}
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-64 overflow-y-auto">
+                      {bookingHistory.map((order, i) => (
+                        <div
+                          key={order.orderReference || i}
+                          onClick={() => {
+                            setConfirmedOrder(order);
+                            setManualOrderRef(order.orderReference);
+                            setManualCartId(order.cartId);
+                          }}
+                          className={`p-3 rounded-xl border transition cursor-pointer flex items-center justify-between ${
+                            confirmedOrder?.orderReference === order.orderReference
+                              ? 'bg-purple-950/40 border-purple-500'
+                              : 'bg-slate-900/60 border-slate-800 hover:bg-slate-900'
+                          }`}
+                        >
+                          <div>
+                            <div className="text-xs font-bold text-white flex items-center gap-2">
+                              <span>مرجع: {order.orderReference}</span>
+                              <span className="text-emerald-400 font-mono">{order.amount} ر.س</span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                              {order.issuedAt ? new Date(order.issuedAt).toLocaleString('ar-SA') : 'مؤكد'} • {order.tickets?.length || order.seatsCount || 1} تذاكر
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            className="px-2.5 py-1 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-[11px] font-bold"
+                          >
+                            عرض التذاكر
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

@@ -906,7 +906,7 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
                   className="px-3 py-1.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-[11px] font-bold flex items-center gap-1 transition shadow-sm cursor-pointer"
                 >
                   <Sparkles className="w-3 h-3 text-amber-300" />
-                  <span>مسار الـ 5 خطوات</span>
+                  <span>المسار الديناميكي (Schema)</span>
                 </button>
 
                 <div className="flex items-center gap-1">

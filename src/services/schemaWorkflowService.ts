@@ -41,42 +41,7 @@ export class SchemaWorkflowService {
     const steps: DynamicWorkflowStep[] = [];
     let stepNumber = 1;
 
-    // 1. Sync & Auth
-    steps.push({
-      id: 'step_catalog_sync',
-      stepNumber: stepNumber++,
-      type: 'catalog_sync',
-      title: 'Platform Verification & Auth',
-      titleAr: 'التحقق من الفعالية وحساب المنصة',
-      badgeAr: 'التوثيق الرسمي',
-      descriptionAr: 'مطابقة الفعالية مع خوادم Webook الرسمية والتحقق من رمز التوثيق (Bearer Token) أو جلسة الزائر.',
-      iconName: 'ShieldCheck',
-      endpoint: `/api/webook/real-event/${event.slug || event.id}`,
-      method: 'GET',
-      isRequired: true,
-      fields: [
-        {
-          id: 'authToken',
-          name: 'authToken',
-          label: 'Authorization Token',
-          labelAr: 'رمز توثيق الحساب (Bearer Token)',
-          descriptionAr: 'يتم التقاطه تلقائياً من الحساب النشط أو تركه لجلسة حجز مباشر',
-          type: 'token_input',
-          required: false,
-        },
-        {
-          id: 'eventSlug',
-          name: 'eventSlug',
-          label: 'Event Slug',
-          labelAr: 'رمز الفعالية الموثق',
-          type: 'text',
-          required: true,
-          defaultValue: event.slug || event.id,
-        }
-      ]
-    });
-
-    // 2. Teams Selection (Sports only)
+    // 1. Teams Selection (Sports only with opposing teams)
     if (hasTeams && event.teams) {
       steps.push({
         id: 'step_team_selection',
@@ -108,8 +73,8 @@ export class SchemaWorkflowService {
       });
     }
 
-    // 3. Fixtures / Sub-Events
-    if (hasSubEvents && event.subEvents) {
+    // 2. Fixtures / Sub-Events (ONLY IF multiple sub-events exist)
+    if (hasSubEvents && event.subEvents && event.subEvents.length > 1) {
       steps.push({
         id: 'step_fixture_selection',
         stepNumber: stepNumber++,
@@ -140,19 +105,18 @@ export class SchemaWorkflowService {
       });
     }
 
-    // 4. Date & Showtime
-    steps.push({
-      id: 'step_datetime_selection',
-      stepNumber: stepNumber++,
-      type: 'datetime_selection',
-      title: 'Select Date & Showtime Slot',
-      titleAr: 'تحديد تاريخ الحضور وفترة العرض',
-      badgeAr: 'المواعيد المتاحة',
-      descriptionAr: 'تحديد الموعد من قائمة الفترات الزمنية المصرحة من المنصة.',
-      iconName: 'Calendar',
-      isRequired: true,
-      fields: [
-        {
+    // 3. Date & Showtime (ONLY IF multiple dates or multiple times exist)
+    const hasMultipleDates = dates.length > 1;
+    const hasMultipleTimes = times.length > 1;
+
+    if (hasMultipleDates || hasMultipleTimes) {
+      const dateTimeFields: any[] = [];
+      let titleAr = 'تحديد تاريخ الحضور وفترة العرض';
+      let badgeAr = 'المواعيد المتاحة';
+      let descAr = 'تحديد الموعد من قائمة الفترات الزمنية المصرحة من المنصة.';
+
+      if (hasMultipleDates) {
+        dateTimeFields.push({
           id: 'selectedDate',
           name: 'selectedDate',
           label: 'Event Date',
@@ -161,8 +125,16 @@ export class SchemaWorkflowService {
           required: true,
           defaultValue: dates[0],
           options: dates.map(d => ({ value: d, label: d, labelAr: d }))
-        },
-        {
+        });
+      }
+
+      if (hasMultipleTimes) {
+        if (!hasMultipleDates) {
+          titleAr = 'تحديد فترة وتوقيت العرض';
+          badgeAr = 'فترات العرض';
+          descAr = 'الفعالية تقام في موعد محدد، يرجى اختيار التوقيت المناسب لحضور العرض.';
+        }
+        dateTimeFields.push({
           id: 'selectedTime',
           name: 'selectedTime',
           label: 'Time Slot',
@@ -171,11 +143,24 @@ export class SchemaWorkflowService {
           required: true,
           defaultValue: times[0],
           options: times.map(t => ({ value: t, label: t, labelAr: t }))
-        }
-      ]
-    });
+        });
+      }
 
-    // 5. Seating Map OR Tier Selection
+      steps.push({
+        id: 'step_datetime_selection',
+        stepNumber: stepNumber++,
+        type: 'datetime_selection',
+        title: 'Select Date & Showtime Slot',
+        titleAr,
+        badgeAr,
+        descriptionAr: descAr,
+        iconName: 'Calendar',
+        isRequired: true,
+        fields: dateTimeFields
+      });
+    }
+
+    // 4. Seating Map OR Tier Selection
     if (isSeated) {
       steps.push({
         id: 'step_seating_selection',
@@ -266,36 +251,38 @@ export class SchemaWorkflowService {
       });
     }
 
-    // 6. Cart Lock
+    // 5. Unified Review, Cart Lock & PayTabs Official Payment Step
     steps.push({
-      id: 'step_cart_hold',
+      id: 'step_checkout_payment',
       stepNumber: stepNumber++,
-      type: 'cart_execution',
-      title: 'POST Add to Cart & Hold Seats',
-      titleAr: 'إرسال طلب POST وقفل المقاعد بالسلة النشطة',
-      badgeAr: 'حجز مؤقت 10 دقائق',
-      descriptionAr: 'تنفيذ طلب POST الرسمي لحجز التذاكر واستخراج معرف السلة المعتمد (cart_id).',
-      iconName: 'ShoppingCart',
+      type: 'checkout_payment',
+      title: 'Order Review & Official PayTabs Checkout',
+      titleAr: 'مراجعة الطلب وبوابة PayTabs الرسمية',
+      badgeAr: 'الدفع المباشر المعتمد (Zero 404)',
+      descriptionAr: 'مراجعة تفاصيل التذاكر، قفل المقاعد فورياً في خوادم Webook الرسمية (10 دقائق)، والتحويل الفوري لبوابة PayTabs السعودية المعتمدة.',
+      iconName: 'CreditCard',
       endpoint: '/api/webook/cart/add',
       method: 'POST',
       isRequired: true,
-      fields: []
-    });
-
-    // 7. Dynamic Checkout
-    steps.push({
-      id: 'step_checkout_url',
-      stepNumber: stepNumber++,
-      type: 'dynamic_checkout',
-      title: 'Dynamic Anti-404 Checkout URL',
-      titleAr: 'رابط الدفع الديناميكي الموثق (بدون 404)',
-      badgeAr: 'رابط رسمي مباشر',
-      descriptionAr: 'توليد رابط الدفع المشفر الحاوي لمعرف السلة النشط (cart_id) للانتقال الفوري للدفع.',
-      iconName: 'ShieldCheck',
-      endpoint: '/api/webook/checkout-url',
-      method: 'POST',
-      isRequired: true,
-      fields: []
+      fields: [
+        {
+          id: 'email',
+          name: 'email',
+          label: 'Contact Email',
+          labelAr: 'البريد الإلكتروني لاستلام التذاكر',
+          type: 'text',
+          required: true,
+          defaultValue: 'user@webook.com',
+        },
+        {
+          id: 'authToken',
+          name: 'authToken',
+          label: 'Bearer Token',
+          labelAr: 'رمز توثيق حساب Webook (Bearer Token)',
+          type: 'token_input',
+          required: false,
+        }
+      ]
     });
 
     const requiredPayloadKeys = [
@@ -381,9 +368,15 @@ export class SchemaWorkflowService {
       payload.metadata.team = values.selectedTeam;
     }
 
+    const effectiveSeatIds = effectiveSeats.map((s: any) => s.id).filter(Boolean);
+
     if (schema.isSeated && effectiveSeats.length > 0) {
       payload.metadata.selectedSeats = JSON.stringify(effectiveSeats);
+      payload.metadata.seatIds = effectiveSeatIds;
       payload.seats = effectiveSeats;
+      payload.seatIds = effectiveSeatIds;
+    } else if (effectiveSeatIds.length > 0) {
+      payload.seatIds = effectiveSeatIds;
     }
 
     if (schema.hasSubEvents && values.selectedSubEventId) {

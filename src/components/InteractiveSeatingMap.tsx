@@ -37,6 +37,9 @@ interface InteractiveSeatingMapProps {
     totalPrice: number;
     active: boolean;
     isCustomPayload?: boolean;
+    paymentGatewayUrl?: string;
+    orderReference?: string;
+    seatIds?: string[];
   } | null;
   reservationError?: ReservationErrorState | null;
   onApplyCustomReservationPayload?: (payload: ReservationFallbackPayload) => void;
@@ -140,6 +143,40 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
       return () => clearInterval(timer);
     }
   }, [cartHoldInfo?.active, cartHoldInfo?.cartId]);
+
+  const [isInitiatingPayment, setIsInitiatingPayment] = useState(false);
+  const [paymentSessionError, setPaymentSessionError] = useState<string | null>(null);
+
+  const handlePayTabsCheckout = async () => {
+    const cartId = cartHoldInfo?.cartId;
+    if (!cartId) return;
+    setIsInitiatingPayment(true);
+    setPaymentSessionError(null);
+    try {
+      const res = await fetch('/api/webook/paytabs/initiate-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cartId,
+          orderReference: cartHoldInfo.orderReference,
+          eventSlug: event.slug,
+          seats: selectedSeats,
+          forceFresh: true,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (res.ok && json && json.paymentGatewayUrl) {
+        setSecondsRemaining(600);
+        window.open(json.paymentGatewayUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        setPaymentSessionError(json?.message || 'تعذر استخراج رابط جلسة الدفع الرسمية من منصة Webook. يرجى التأكد من توفر رمز التوثيق (Bearer Token).');
+      }
+    } catch (err: any) {
+      setPaymentSessionError(`فشل الاتصال بخادم الدفع: ${err.message}`);
+    } finally {
+      setIsInitiatingPayment(false);
+    }
+  };
 
   const formatCountdown = (secs: number) => {
     const mins = Math.floor(secs / 60);
@@ -1484,7 +1521,54 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
               اختر طريقة التثبيت الفوري في منصة Webook:
             </div>
 
+            {paymentSessionError && (
+              <div className="w-full p-3 bg-rose-950/80 border border-rose-500/50 rounded-xl text-xs text-rose-200 flex items-center justify-between gap-2 animate-in fade-in">
+                <span>⚠️ {paymentSessionError}</span>
+                <button
+                  type="button"
+                  onClick={() => setPaymentSessionError(null)}
+                  className="text-rose-400 hover:text-rose-200 text-xs font-bold px-2 py-1 rounded"
+                >
+                  إغلاق
+                </button>
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+              {cartHoldInfo?.cartId && (
+                <button
+                  type="button"
+                  onClick={handlePayTabsCheckout}
+                  disabled={isInitiatingPayment}
+                  className="w-full sm:w-auto px-5 py-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isInitiatingPayment ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>جاري إنشاء جلسة الدفع والتحويل...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CreditCard className="w-4 h-4" />
+                      <span>💳 الدفع الآن عبر بوابة PayTabs (توليد فوري للجلسة)</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </>
+                  )}
+                </button>
+              )}
+
+              {cartHoldInfo?.cartId && secondsRemaining === 0 && (
+                <button
+                  type="button"
+                  onClick={handlePayTabsCheckout}
+                  disabled={isInitiatingPayment}
+                  className="w-full sm:w-auto px-4 py-3 bg-rose-600 hover:bg-rose-500 text-white font-black text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-2 cursor-pointer animate-pulse"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isInitiatingPayment ? 'animate-spin' : ''}`} />
+                  <span>تحديث جلسة الدفع المنتهية (Refresh Payment)</span>
+                </button>
+              )}
+
               <button
                 onClick={copyLiveSessionInjector}
                 className="w-full sm:w-auto px-5 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-2 cursor-pointer"

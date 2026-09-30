@@ -35,10 +35,12 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
   
   // Fallback interactive manual token/payload states
   const [showManualTokenFallback, setShowManualTokenFallback] = useState<boolean>(false);
+  const [isCaptchaError, setIsCaptchaError] = useState<boolean>(false);
   const [manualAuthToken, setManualAuthToken] = useState<string>('');
   const [customAuthJsonPayload, setCustomAuthJsonPayload] = useState<string>('');
   const [manualTokenError, setManualTokenError] = useState<string>('');
   const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);
+  const [copiedExtractorCode, setCopiedExtractorCode] = useState<boolean>(false);
 
   // In-card re-auth states for existing accounts
   const [authenticatingAccountId, setAuthenticatingAccountId] = useState<string | null>(null);
@@ -55,6 +57,7 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
 
     setIsLoggingIn(true);
     setLoginError('');
+    setIsCaptchaError(false);
     setLoginSuccessMsg('');
     setShowManualTokenFallback(false);
 
@@ -99,7 +102,14 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
       } else {
         // No mock success allowed! Avoid any fake login states
         const errorDetail = data?.message || `فشل تسجيل الدخول من المنصة (كود الحالة: ${response.status})`;
+        const captchaTriggered = Boolean(
+          data?.isCaptchaRequired ||
+          (data?.rawResponse?.error?.captcha) ||
+          (typeof errorDetail === 'string' && errorDetail.toLowerCase().includes('captcha'))
+        );
+
         setLoginError(errorDetail);
+        setIsCaptchaError(captchaTriggered);
         // Automatically reveal interactive fallback UI with manual token input
         setShowManualTokenFallback(true);
       }
@@ -309,14 +319,59 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
 
           {/* Real Error Notification */}
           {loginError && (
-            <div className="p-3.5 bg-rose-950/40 border border-rose-500/50 rounded-xl text-xs text-rose-300 space-y-2">
+            <div className={`p-4 rounded-xl text-xs space-y-3 ${
+              isCaptchaError 
+                ? 'bg-amber-950/40 border border-amber-500/50 text-amber-200'
+                : 'bg-rose-950/40 border border-rose-500/50 text-rose-300'
+            }`}>
               <div className="flex items-center gap-2 font-bold">
-                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-                <span>رد خادم المنصة (لم يتم توليد أي حالة وهمية):</span>
+                {isCaptchaError ? (
+                  <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+                )}
+                <span className="text-sm">
+                  {isCaptchaError 
+                    ? 'تنبيه أمني من المنصة: التحقق البشري مطلوب (Cloudflare Captcha / Turnstile)' 
+                    : 'رد خادم المنصة (لم يتم توليد أي حالة وهمية):'}
+                </span>
               </div>
-              <p className="font-mono text-[11px] text-rose-200/90 bg-black/40 p-2 rounded-lg border border-rose-500/20">
+
+              <p className="font-mono text-[11px] bg-black/50 p-2.5 rounded-lg border border-slate-700/60 leading-relaxed">
                 {loginError}
               </p>
+
+              {isCaptchaError && (
+                <div className="bg-slate-950/80 p-3 rounded-xl border border-amber-500/30 space-y-2">
+                  <div className="text-[11px] font-bold text-white flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    <span>كيفية تجاوز Captcha والحصول على رمز التوثيق (Auth Token) بنقرة واحدة:</span>
+                  </div>
+                  <ol className="text-[11px] text-slate-300 space-y-1.5 list-decimal list-inside mr-1">
+                    <li>افتح موقع <a href="https://webook.com" target="_blank" rel="noreferrer" className="text-pink-400 underline font-bold inline-flex items-center gap-0.5">webook.com <ExternalLink className="w-2.5 h-2.5" /></a> في متصفحك وسجل دخولك العادي (سيتم حل الكابتشا هناك بكل سهولة).</li>
+                    <li>انسخ الكود السريع أدناه والصقه في كونسول المتصفح (F12 &gt; Console) وسيتم نسخ التوكن فوراً إلى الحافظة.</li>
+                    <li>الصق التوكن في حقل "رمز التوثيق المباشر" أدناه واضغط "تطبيق وتخزين".</li>
+                  </ol>
+                  
+                  <div className="flex items-center gap-2 pt-1">
+                    <div className="flex-1 bg-black/60 font-mono text-[10px] text-emerald-400 p-2 rounded-lg border border-emerald-500/30 truncate" dir="ltr">
+                      copy(localStorage.getItem('wbk_access_token') || sessionStorage.getItem('wbk_access_token') || localStorage.getItem('token'))
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText("copy(localStorage.getItem('wbk_access_token') || sessionStorage.getItem('wbk_access_token') || localStorage.getItem('token')); console.log('✅ تم نسخ رمز التوثيق إلى الحافظة!');");
+                        setCopiedExtractorCode(true);
+                        setTimeout(() => setCopiedExtractorCode(false), 2500);
+                      }}
+                      className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-[11px] font-bold shrink-0 flex items-center gap-1 cursor-pointer transition shadow"
+                    >
+                      {copiedExtractorCode ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedExtractorCode ? 'تم نسخ كود الكونسول' : 'نسخ أمر الكونسول'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

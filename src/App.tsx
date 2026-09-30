@@ -68,6 +68,9 @@ export default function App() {
     totalPrice: number;
     active: boolean;
     isCustomPayload?: boolean;
+    paymentGatewayUrl?: string;
+    orderReference?: string;
+    seatIds?: string[];
   } | null>(null);
   const [reservationError, setReservationError] = useState<ReservationErrorState | null>(null);
 
@@ -269,7 +272,11 @@ export default function App() {
         body: JSON.stringify({
           eventId: currentEvent.id,
           eventUrl: currentEvent.url,
+          ticket_id: botConfig.preferredTier || (selectedSeats[0]?.tierId) || 'regular',
+          event_ticket_id: botConfig.preferredTier || (selectedSeats[0]?.tierId) || 'regular',
+          ticketId: botConfig.preferredTier || (selectedSeats[0]?.tierId) || 'regular',
           seats: selectedSeats,
+          seatIds: selectedSeats.map((s) => s.id),
           email: targetEmail || 'user@webook-account',
           date: botConfig.selectedDate,
           tier: botConfig.preferredTier,
@@ -279,12 +286,16 @@ export default function App() {
 
       const data = await response.json().catch(() => null);
       if (response.ok && data && data.success && data.cartId) {
+        const officialGatewayUrl = data.paymentGatewayUrl || data.redirectUrl || data.paymentPageUrl || data.paytabsRedirectUrl;
         setCartHoldInfo({
           cartId: data.cartId,
+          orderReference: data.orderReference,
+          paymentGatewayUrl: officialGatewayUrl,
           expiresAt: data.holdExpiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           totalPrice: data.totalPrice,
           active: true,
           isCustomPayload: Boolean(data.isCustomPayload),
+          seatIds: data.seatIds || selectedSeats.map((s) => s.id),
         });
         setReservationError(null);
 

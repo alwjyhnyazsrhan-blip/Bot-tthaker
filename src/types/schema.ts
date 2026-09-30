@@ -6,7 +6,10 @@ export type WorkflowStepType =
   | 'seating_map_selection'
   | 'tier_selection'
   | 'cart_execution'
-  | 'dynamic_checkout';
+  | 'dynamic_checkout'
+  | 'payment_verification'
+  | 'checkout_payment'
+  | 'booking_confirmation';
 
 export interface WorkflowFieldOption {
   value: string;
