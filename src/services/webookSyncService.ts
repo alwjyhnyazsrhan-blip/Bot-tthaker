@@ -19,6 +19,9 @@ export {
   generateVenueSeatingMapByBlueprint,
 };
 
+// 100% Strict Real-Time Catalog: Zero fallback mock data or cached static lists
+export const LIVE_WEBOOK_CATALOG: WebookEvent[] = [];
+
 export interface WebookSyncStatus {
   lastSyncTimestamp: string;
   isSyncing: boolean;
@@ -38,8 +41,8 @@ class WebookSyncManager {
   private pollIntervalId: any = null;
   private newReleaseListeners: ((newEvents: WebookEvent[]) => void)[] = [];
   private status: WebookSyncStatus = {
-    lastSyncTimestamp: 'قيد المزامنة الحية...',
-    isSyncing: false,
+    lastSyncTimestamp: 'قيد الاتصال بالمنصة الرسمية...',
+    isSyncing: true,
     totalEventsSynced: 0,
     activeSessions: 1,
     connectedToWebookApi: true,
@@ -63,6 +66,14 @@ class WebookSyncManager {
 
   public getStatus(): WebookSyncStatus {
     return this.status;
+  }
+
+  public async addCustomWebookEvent(url: string, token?: string): Promise<WebookEvent> {
+    const synced = await this.syncEventWithOfficialWebook(url, token);
+    if (!synced) {
+      throw new Error(`الفعالية (${url}) غير متاحة في خوادم Webook الرسمية.`);
+    }
+    return synced;
   }
 
   /**

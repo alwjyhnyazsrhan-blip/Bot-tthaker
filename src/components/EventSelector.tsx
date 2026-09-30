@@ -118,6 +118,24 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
     }
   };
 
+  const handleSimulateNewRelease = async () => {
+    setIsSimulatingRelease(true);
+    setReleaseFeedback('جاري فحص المنصة ورصد أحدث التذاكر والفعاليات المطروحة...');
+    try {
+      const cleanToken = authToken.trim() || (typeof window !== 'undefined' ? localStorage.getItem('webook_bearer_token')?.trim() : undefined);
+      const loaded = await webookSyncManager.fetchAllEventsWithPagination(cleanToken);
+      if (onUpdateEvents && loaded.length > 0) {
+        onUpdateEvents(loaded);
+      }
+      setReleaseFeedback(`⚡ تم التحقق من المنصة ورصد ${loaded.length} فعاليات نشطة ومحدثة!`);
+    } catch (err: any) {
+      setReleaseFeedback(`فشل فحص الفعاليات: ${err.message}`);
+    } finally {
+      setIsSimulatingRelease(false);
+      setTimeout(() => setReleaseFeedback(''), 5000);
+    }
+  };
+
   // Real fetch request to retrieve live event catalogs and pricing tiers directly from the platform
   const handleFetchLiveEvents = async (targetPage?: number) => {
     const cleanEndpoint = apiEndpoint.trim();

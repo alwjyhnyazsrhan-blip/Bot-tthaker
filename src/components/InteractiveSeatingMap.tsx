@@ -150,6 +150,20 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
   const handlePayTabsCheckout = async () => {
     const cartId = cartHoldInfo?.cartId;
     if (!cartId) return;
+
+    // 1. If we already have a valid active secure redirect URL from cartHoldInfo, assign directly to window.location.href!
+    const existingUrl = cartHoldInfo?.paymentGatewayUrl;
+    if (existingUrl && !existingUrl.includes('PTSESS_') && secondsRemaining > 60) {
+      try {
+        if (window.top && window.top !== window) {
+          window.top.location.href = existingUrl;
+          return;
+        }
+      } catch {}
+      window.location.href = existingUrl;
+      return;
+    }
+
     setIsInitiatingPayment(true);
     setPaymentSessionError(null);
     try {
@@ -165,9 +179,24 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
         }),
       });
       const json = await res.json().catch(() => null);
-      if (res.ok && json && json.paymentGatewayUrl) {
+      const secureRedirectUrl = json?.redirect_url || json?.paymentGatewayUrl || json?.redirectUrl || json?.paymentPageUrl;
+
+      if (res.ok && json && secureRedirectUrl) {
         setSecondsRemaining(600);
-        window.open(json.paymentGatewayUrl, '_blank', 'noopener,noreferrer');
+
+        // Directly assign secure payment URL to window.location.href without intermediate blank windows
+        try {
+          if (window.top && window.top !== window) {
+            window.top.location.href = secureRedirectUrl;
+            return;
+          }
+        } catch {}
+
+        try {
+          window.location.href = secureRedirectUrl;
+        } catch {
+          window.location.assign(secureRedirectUrl);
+        }
       } else {
         setPaymentSessionError(json?.message || 'تعذر استخراج رابط جلسة الدفع الرسمية من منصة Webook. يرجى التأكد من توفر رمز التوثيق (Bearer Token).');
       }

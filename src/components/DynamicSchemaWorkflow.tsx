@@ -78,6 +78,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     totalPrice: number;
     dynamicCheckoutUrl: string;
     directBookingUrl: string;
+    redirect_url?: string;
     paymentGatewayUrl?: string;
     redirectUrl?: string;
     paymentPageUrl?: string;
@@ -275,41 +276,37 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Redirect user session directly to official gateway URL using standard navigation or external browser intent
-  const handleRedirectToGateway = (customUrl?: string) => {
-    const url = customUrl || activeCart?.paymentGatewayUrl || activeCart?.redirectUrl || activeCart?.paymentPageUrl;
-    if (!url) return;
+  // Direct programmatic location assignment using the exact secure redirect_url received from live Webook API
+  const executeDirectPaymentRedirect = (targetUrl: string) => {
+    if (!targetUrl) return;
 
-    // 1. Attempt top-level window navigation to break out of iframe if allowed
+    // 1. Break out of iframe to top-level window if allowed
     try {
       if (window.top && window.top !== window) {
-        window.top.location.href = url;
+        window.top.location.href = targetUrl;
         return;
       }
     } catch {
-      // Cross-origin restriction on window.top
+      // Cross-origin restriction on top-level window
     }
 
-    // 2. Standard location redirect
+    // 2. Direct location assignment to window.location.href
     try {
-      window.location.href = url;
-      return;
+      window.location.href = targetUrl;
     } catch {
-      // Fallback
+      try {
+        window.location.assign(targetUrl);
+      } catch (err) {
+        console.warn('Direct location assignment failed:', err);
+      }
     }
+  };
 
-    // 3. Fallback external intent anchor
-    try {
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.target = '_blank';
-      anchor.rel = 'noopener noreferrer';
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
-    } catch (e) {
-      console.warn('Gateway navigation redirect failed:', e);
-    }
+  // Redirect user session directly to official gateway URL
+  const handleRedirectToGateway = (customUrl?: string) => {
+    const url = customUrl || activeCart?.redirect_url || activeCart?.paymentGatewayUrl || activeCart?.redirectUrl || activeCart?.paymentPageUrl;
+    if (!url) return;
+    executeDirectPaymentRedirect(url);
   };
 
   const stepsList: DynamicWorkflowStep[] = schema?.steps || [];
@@ -352,11 +349,12 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
       });
 
       const json = await res.json().catch(() => null);
+      const freshUrl = json?.redirect_url || json?.paymentGatewayUrl || json?.redirectUrl || json?.paymentPageUrl;
 
-      if (res.ok && json && json.success && json.paymentGatewayUrl) {
-        const freshUrl = json.paymentGatewayUrl;
+      if (res.ok && json && json.success && freshUrl) {
         setActiveCart((prev) => prev ? {
           ...prev,
+          redirect_url: freshUrl,
           paymentGatewayUrl: freshUrl,
           redirectUrl: freshUrl,
           paymentPageUrl: freshUrl,
@@ -367,15 +365,16 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
         const timeStr = new Date().toLocaleTimeString('ar-SA');
         setPaymentSessionFreshAt(timeStr);
         setCartSecondsLeft(600); // Reset timer to fresh 10 mins!
-        setFreshSessionNotice(`تم تحديث جلسة الدفع برابط جديد طازج (الساعة ${timeStr}) وصلاحية 10 دقائق كاملة لتفادي أخطاء 404.`);
+        setFreshSessionNotice(`تم تنشيط جلسة الدفع الآمنة برابط مباشر (الساعة ${timeStr}) وجاري التحويل لبوابة PayTabs.`);
 
         updateStepLog(currentStepObj?.id || 'step_checkout_url', {
           status: 'success',
           statusCode: 200,
-          message: 'تم توليد جلسة الدفع المشفرة وتأكيد الاتصال ببوابة PayTabs الرسمية بنجاح والتحويل المباشر للجلسة!',
+          message: 'تم استلام وتأكيد رابط جلسة الدفع الرسمية من خوادم Webook مباشرة والتحويل الفوري لبوابة PayTabs!',
           responsePayload: {
             success: true,
             status: 'PAYTABS_SESSION_READY',
+            redirect_url: freshUrl,
             orderReference: json.orderReference || activeCart?.orderReference,
             expiresAt: json.expiresAt,
           },
@@ -384,37 +383,40 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
         setIsGeneratingPaymentSession(false);
 
         if (autoRedirect) {
-          handleRedirectToGateway(freshUrl);
+          executeDirectPaymentRedirect(freshUrl);
         }
         return freshUrl;
       } else {
         setIsGeneratingPaymentSession(false);
-        const errMsg = json?.message || 'تعذر توليد جلسة دفع جديدة';
+        const errMsg = json?.message || 'تعذر توليد جلسة دفع جديدة من خوادم Webook';
         setFreshSessionNotice(`خطأ: ${errMsg}`);
         return null;
       }
     } catch (err: any) {
       setIsGeneratingPaymentSession(false);
-      setFreshSessionNotice(`فشل الاتصال بالخادم: ${err.message}`);
+      setFreshSessionNotice(`فشل الاتصال بخادم الدفع: ${err.message}`);
       return null;
     }
+  };
+
+  // Immediate "Pay Now" click handler: assigns window.location.href directly with zero intermediate blank windows
+  const handlePayNowClick = async () => {
+    // 1. If we already have an active verified redirect URL and session is fresh, assign directly to window.location.href!
+    const existingUrl = activeCart?.redirect_url || activeCart?.paymentGatewayUrl || activeCart?.redirectUrl || activeCart?.paymentPageUrl;
+    if (existingUrl && !existingUrl.includes('PTSESS_') && cartSecondsLeft > 60) {
+      executeDirectPaymentRedirect(existingUrl);
+      return;
+    }
+
+    // 2. Otherwise fetch the fresh session and assign directly to window.location.href upon response (Zero intermediate blank windows!)
+    await handleInitiateFreshPaymentSession(true);
   };
 
   // Open external browser intent with a fresh on-demand session
   const handleOpenExternalIntentWithFreshSession = async () => {
     const freshUrl = await handleInitiateFreshPaymentSession(false);
     if (freshUrl) {
-      try {
-        const anchor = document.createElement('a');
-        anchor.href = freshUrl;
-        anchor.target = '_blank';
-        anchor.rel = 'noopener noreferrer';
-        document.body.appendChild(anchor);
-        anchor.click();
-        document.body.removeChild(anchor);
-      } catch (e) {
-        handleRedirectToGateway(freshUrl);
-      }
+      executeDirectPaymentRedirect(freshUrl);
     }
   };
 
@@ -2066,7 +2068,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                   {/* Primary CTA: Generate Fresh Session on Click and Redirect */}
                   <button
                     type="button"
-                    onClick={() => handleInitiateFreshPaymentSession(true)}
+                    onClick={handlePayNowClick}
                     disabled={isGeneratingPaymentSession}
                     className="flex-1 min-w-[260px] py-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-sm rounded-xl text-center shadow-xl shadow-emerald-500/30 flex items-center justify-center gap-2.5 transition cursor-pointer hover:scale-[1.01]"
                   >
@@ -2395,7 +2397,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                     <div className="flex flex-wrap items-center gap-2.5">
                       <button
                         type="button"
-                        onClick={() => handleInitiateFreshPaymentSession(true)}
+                        onClick={handlePayNowClick}
                         disabled={isGeneratingPaymentSession}
                         className="flex-1 min-w-[220px] py-3.5 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs sm:text-sm rounded-xl text-center shadow-xl shadow-emerald-500/30 flex items-center justify-center gap-2 transition cursor-pointer hover:scale-[1.01]"
                       >
