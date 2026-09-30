@@ -7,6 +7,7 @@ import { WebookEvent, Seat, BotConfig, ReservationErrorState, ReservationFallbac
 import { downloadWebookExtensionZip } from '../utils/extensionGenerator';
 import { getBookmarkletCode, getWebookBookingUrl, getWebookDirectCheckoutUrl, getBrowserInstantBookerScript } from '../utils/webookUrls';
 import { ReservationFallbackCard } from './ReservationFallbackCard';
+import { getActiveBearerToken } from '../utils/authManager';
 
 interface ZeroTouchAutoInjectorModalProps {
   isOpen: boolean;
@@ -48,9 +49,13 @@ export const ZeroTouchAutoInjectorModal: React.FC<ZeroTouchAutoInjectorModalProp
     setIsInjecting(true);
     setApiError(null);
     try {
+      const activeToken = getActiveBearerToken();
       const res = await fetch('/api/webook/hold-seats', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(activeToken ? { 'Authorization': `Bearer ${activeToken}` } : {})
+        },
         body: JSON.stringify({
           eventId: event.id,
           eventUrl: event.url,
@@ -61,6 +66,7 @@ export const ZeroTouchAutoInjectorModal: React.FC<ZeroTouchAutoInjectorModalProp
           email: accountEmailInput.trim() || 'user@webook.com',
           date: config.selectedDate,
           tier: config.preferredTier,
+          authToken: activeToken,
         }),
       });
       const data = await res.json().catch(() => null);

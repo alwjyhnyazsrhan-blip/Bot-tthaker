@@ -14,6 +14,7 @@ import { DynamicSchemaWorkflow } from './components/DynamicSchemaWorkflow';
 import { Account, BotConfig, BotLog, WebookEvent, Seat, TicketTier, SeatingMapData, ReservationErrorState, ReservationFallbackPayload } from './types/bot';
 import { LIVE_WEBOOK_CATALOG, detectVenueBlueprint, generateVenueSeatingMapByBlueprint, webookSyncManager } from './services/webookSyncService';
 import { generateSeleniumPythonScript } from './utils/codeGenerators';
+import { getActiveBearerToken, setActiveBearerToken } from './utils/authManager';
 
 const DEFAULT_EMPTY_EVENT: WebookEvent = {
   id: '',
@@ -180,9 +181,9 @@ export default function App() {
 
   // When accounts or auth tokens change, automatically re-fetch catalog with real Bearer Token
   useEffect(() => {
-    const activeToken = accounts.find((a) => a.authToken)?.authToken;
+    const activeToken = getActiveBearerToken() || accounts.find((a) => a.authToken)?.authToken;
     if (activeToken) {
-      localStorage.setItem('webook_bearer_token', activeToken);
+      setActiveBearerToken(activeToken);
       webookSyncManager.fetchAllEventsWithPagination(activeToken);
     }
   }, [accounts]);
@@ -341,7 +342,7 @@ export default function App() {
 
     const activeAccount = accounts[0];
     const targetEmail = activeAccount?.email || '';
-    const authToken = activeAccount?.authToken;
+    const authToken = getActiveBearerToken() || activeAccount?.authToken;
 
     try {
       const response = await fetch('/api/webook/hold-seats', {
@@ -367,7 +368,13 @@ export default function App() {
 
       const data = await response.json().catch(() => null);
       if (response.ok && data && data.success && data.cartId) {
-        const officialGatewayUrl = data.paymentGatewayUrl || data.redirectUrl || data.paymentPageUrl || data.paytabsRedirectUrl;
+        const rawGatewayUrl = data.paymentGatewayUrl || data.redirect_url || data.redirectUrl || data.paymentPageUrl || data.paytabsRedirectUrl;
+        let officialGatewayUrl = rawGatewayUrl;
+        if (rawGatewayUrl) {
+          try {
+            officialGatewayUrl = new URL(rawGatewayUrl, window.location.origin).href;
+          } catch {}
+        }
         setCartHoldInfo({
           cartId: data.cartId,
           orderReference: data.orderReference,

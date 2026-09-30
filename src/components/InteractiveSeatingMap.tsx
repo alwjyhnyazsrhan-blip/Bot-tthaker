@@ -21,6 +21,7 @@ import {
   generateVenueSeatingMapByBlueprint, 
   detectVenueBlueprint 
 } from '../services/venueSeatingService';
+import { getActiveBearerToken } from '../utils/authManager';
 
 interface InteractiveSeatingMapProps {
   event: WebookEvent;
@@ -107,7 +108,10 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
     let isMounted = true;
     const fetchOfficialLive = async () => {
       try {
-        const res = await fetch(`/api/webook/real-event/${event.slug}`);
+        const activeToken = getActiveBearerToken();
+        const res = await fetch(`/api/webook/real-event/${event.slug}`, {
+          headers: activeToken ? { 'Authorization': `Bearer ${activeToken}` } : {}
+        });
         if (!res.ok) return;
         const json = await res.json();
         if (json && json.success && json.data?.tiers?.length > 0 && isMounted) {
@@ -151,56 +155,86 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
     const cartId = cartHoldInfo?.cartId;
     if (!cartId) return;
 
-    // 1. If we already have a valid active secure redirect URL from cartHoldInfo, assign directly to window.location.href!
-    const existingUrl = cartHoldInfo?.paymentGatewayUrl;
-    if (existingUrl && !existingUrl.includes('PTSESS_') && secondsRemaining > 60) {
-      try {
-        if (window.top && window.top !== window) {
-          window.top.location.href = existingUrl;
-          return;
-        }
-      } catch {}
-      window.location.href = existingUrl;
-      return;
-    }
+    // Pre-open new browser tab synchronously in response to user click to prevent popup blockers and bypass iframe embedding restrictions
+    let popupTab: Window | null = null;
+    try {
+      popupTab = window.open('about:blank', '_blank');
+    } catch {}
 
     setIsInitiatingPayment(true);
     setPaymentSessionError(null);
     try {
+      const activeToken = getActiveBearerToken();
       const res = await fetch('/api/webook/paytabs/initiate-session', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(activeToken ? { 'Authorization': `Bearer ${activeToken}` } : {})
+        },
         body: JSON.stringify({
           cartId,
           orderReference: cartHoldInfo.orderReference,
           eventSlug: event.slug,
           seats: selectedSeats,
+          authToken: activeToken,
           forceFresh: true,
         }),
       });
       const json = await res.json().catch(() => null);
-      const secureRedirectUrl = json?.redirect_url || json?.paymentGatewayUrl || json?.redirectUrl || json?.paymentPageUrl;
+      const rawUrl = json?.redirect_url || json?.paymentGatewayUrl || json?.redirectUrl || json?.paymentPageUrl;
 
-      if (res.ok && json && secureRedirectUrl) {
+      if (res.ok && json && rawUrl) {
         setSecondsRemaining(600);
 
-        // Directly assign secure payment URL to window.location.href without intermediate blank windows
+        // Convert to absolute URL cleanly
+        let absoluteUrl = String(rawUrl).trim();
+        try {
+          absoluteUrl = new URL(rawUrl, window.location.origin).href;
+        } catch {}
+
+        // 1. Direct navigation on the opened tab to open Webook outside the restricted iframe
+        if (popupTab && !popupTab.closed) {
+          popupTab.location.href = absoluteUrl;
+          return;
+        }
+
+        // 2. Open directly in a new browser tab using window.open(url, '_blank')
+        try {
+          const opened = window.open(absoluteUrl, '_blank', 'noopener,noreferrer');
+          if (opened) return;
+        } catch {}
+
+        // 3. Or navigate top-level window via window.top.location.href
         try {
           if (window.top && window.top !== window) {
-            window.top.location.href = secureRedirectUrl;
+            window.top.location.href = absoluteUrl;
             return;
           }
         } catch {}
 
+        // 4. Programmatic anchor click with target="_blank"
         try {
-          window.location.href = secureRedirectUrl;
-        } catch {
-          window.location.assign(secureRedirectUrl);
-        }
+          const link = document.createElement('a');
+          link.href = absoluteUrl;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          return;
+        } catch {}
+
+        window.location.href = absoluteUrl;
       } else {
-        setPaymentSessionError(json?.message || 'تعذر استخراج رابط جلسة الدفع الرسمية من منصة Webook. يرجى التأكد من توفر رمز التوثيق (Bearer Token).');
+        if (popupTab && !popupTab.closed) {
+          popupTab.close();
+        }
+        setPaymentSessionError(json?.message || 'تعذر استخراج رابط جلسة الدفع الرسمية من منصة Webook. تأكد من تفعيل حسابك في مدير الحسابات.');
       }
     } catch (err: any) {
+      if (popupTab && !popupTab.closed) {
+        popupTab.close();
+      }
       setPaymentSessionError(`فشل الاتصال بخادم الدفع: ${err.message}`);
     } finally {
       setIsInitiatingPayment(false);
@@ -236,10 +270,14 @@ export const InteractiveSeatingMap: React.FC<InteractiveSeatingMapProps> = ({
   const handleLiveSyncFromWebook = async () => {
     setSyncStatusMsg('جاري جلب أحدث الأسعار والتذاكر والمخطط الحي من Webook...');
     try {
+      const activeToken = getActiveBearerToken();
       const res = await fetch('/api/webook/sync-event', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: event.url, slug: event.slug })
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(activeToken ? { 'Authorization': `Bearer ${activeToken}` } : {})
+        },
+        body: JSON.stringify({ url: event.url, slug: event.slug, authToken: activeToken })
       });
       const data = await res.json();
       if (data.success && data.event && data.event.tiers && onUpdateEventTiers) {

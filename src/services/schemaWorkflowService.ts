@@ -1,5 +1,6 @@
 import { DynamicEventWorkflowSchema, DynamicWorkflowStep } from '../types/schema';
 import { WebookEvent } from '../types/bot';
+import { getActiveBearerToken } from '../utils/authManager';
 
 export class SchemaWorkflowService {
   /**
@@ -7,7 +8,7 @@ export class SchemaWorkflowService {
    * Zero fallback mock data or simulated schemas.
    */
   async fetchEventWorkflowSchema(slug: string, token?: string): Promise<DynamicEventWorkflowSchema> {
-    const cleanToken = token?.trim() || (typeof window !== 'undefined' ? localStorage.getItem('webook_bearer_token')?.trim() : undefined);
+    const cleanToken = token?.trim() || getActiveBearerToken();
     const headers: Record<string, string> = { 'Accept': 'application/json' };
     if (cleanToken) {
       headers['Authorization'] = `Bearer ${cleanToken}`;

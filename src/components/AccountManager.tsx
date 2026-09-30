@@ -6,6 +6,7 @@ import {
   ShieldAlert
 } from 'lucide-react';
 import { Account } from '../types/bot';
+import { setActiveBearerToken, getActiveBearerToken } from '../utils/authManager';
 
 interface AccountManagerProps {
   accounts: Account[];
@@ -80,7 +81,8 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
       if (response.ok && data && data.success && (data.token || data.authToken)) {
         // Real Auth Token captured from platform JSON response
         const realToken = data.token || data.authToken;
-        setLoginSuccessMsg('تم التحقق الفعلي بنجاح! تم التقاط رمز التوثيق (Auth Token) وتخزينه في حالة التطبيق.');
+        setLoginSuccessMsg('تم التحقق الفعلي بنجاح! تم التقاط رمز التوثيق (Auth Token) وتفعيله تلقائياً لجميع الطلبات.');
+        setActiveBearerToken(realToken, newEmail.trim());
         
         onAddAccount({
           email: newEmail.trim(),
@@ -100,7 +102,7 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
         setManualAuthToken('');
         setShowAddForm(false);
       } else {
-        // No mock success allowed! Avoid any fake login states
+        // Honest error reporting
         const errorDetail = data?.message || `فشل تسجيل الدخول من المنصة (كود الحالة: ${response.status})`;
         const captchaTriggered = Boolean(
           data?.isCaptchaRequired ||
@@ -110,13 +112,10 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
 
         setLoginError(errorDetail);
         setIsCaptchaError(captchaTriggered);
-        // Automatically reveal interactive fallback UI with manual token input
-        setShowManualTokenFallback(true);
       }
     } catch (err: any) {
-      // Network or API connection failure - no mock success!
+      // Network or API connection failure
       setLoginError(`تعذر إتمام طلب التوثيق: ${err.message || 'خطأ في الشبكة'}`);
-      setShowManualTokenFallback(true);
     } finally {
       setIsLoggingIn(false);
     }
@@ -151,10 +150,12 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
       return;
     }
 
+    setActiveBearerToken(tokenToUse, newEmail.trim());
+
     onAddAccount({
       email: newEmail.trim(),
       password: newPassword || '••••••••',
-      name: newName.trim() || `حساب توثيق يدوي ${accounts.length + 1}`,
+      name: newName.trim() || `حساب توثيق ${accounts.length + 1}`,
       authToken: tokenToUse,
       webookSessionToken: tokenToUse,
       isRealToken: true,
@@ -189,6 +190,7 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
 
       if (response.ok && data && data.success && (data.token || data.authToken)) {
         const realToken = data.token || data.authToken;
+        setActiveBearerToken(realToken, acc.email);
         onUpdateAccount({
           ...acc,
           authToken: realToken,
@@ -217,13 +219,15 @@ export const AccountManager: React.FC<AccountManagerProps> = ({
     }
   };
 
-  // Save manual token update on an existing account
+  // Save token update on an existing account
   const handleSaveEditedToken = (acc: Account) => {
     if (!tempEditedToken.trim()) return;
+    const cleanToken = tempEditedToken.trim();
+    setActiveBearerToken(cleanToken, acc.email);
     onUpdateAccount({
       ...acc,
-      authToken: tempEditedToken.trim(),
-      webookSessionToken: tempEditedToken.trim(),
+      authToken: cleanToken,
+      webookSessionToken: cleanToken,
       isRealToken: true,
       authError: undefined,
       status: 'ready',

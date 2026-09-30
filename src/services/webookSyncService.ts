@@ -1,5 +1,6 @@
 import { WebookEvent, Seat, SeatingMapData, SeatingSection, TicketTier, VenueBlueprintId } from '../types/bot';
 import { playReservationChime } from '../utils/audioAlert';
+import { getActiveBearerToken } from '../utils/authManager';
 
 import {
   generateVenueSeatingMap,
@@ -89,7 +90,7 @@ class WebookSyncManager {
     this.notify();
 
     try {
-      const cleanToken = token?.trim() || (typeof window !== 'undefined' ? localStorage.getItem('webook_bearer_token')?.trim() : undefined);
+      const cleanToken = token?.trim() || getActiveBearerToken();
       const headers: Record<string, string> = { 'Accept': 'application/json' };
       if (cleanToken) {
         headers['Authorization'] = `Bearer ${cleanToken}`;
@@ -227,7 +228,7 @@ class WebookSyncManager {
       }
       targetSlug = targetSlug.replace(/^https?:\/\/[^/]+\//, '').replace(/\//g, '-').replace(/\/book$/, '');
 
-      const cleanToken = token?.trim() || (typeof window !== 'undefined' ? localStorage.getItem('webook_bearer_token')?.trim() : undefined);
+      const cleanToken = token?.trim() || getActiveBearerToken();
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (cleanToken) {
         headers['Authorization'] = `Bearer ${cleanToken}`;

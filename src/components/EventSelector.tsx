@@ -7,6 +7,7 @@ import {
 import { WebookEvent, BotConfig, Account, TicketTier } from '../types/bot';
 import { generateVenueSeatingMap, detectVenueBlueprint, generateVenueSeatingMapByBlueprint } from '../services/venueSeatingService';
 import { webookSyncManager } from '../services/webookSyncService';
+import { getActiveBearerToken, getActiveAccount } from '../utils/authManager';
 
 interface EventSelectorProps {
   events: WebookEvent[];
@@ -66,15 +67,20 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
   const [isSimulatingRelease, setIsSimulatingRelease] = useState<boolean>(false);
   const [releaseFeedback, setReleaseFeedback] = useState<string>('');
 
-  // Automatically sync authToken from active accounts if available and not yet set
+  // Automatically sync authToken from active accounts and stored auth state
   useEffect(() => {
-    if (accounts.length > 0 && !authToken) {
+    const activeToken = getActiveBearerToken();
+    if (activeToken) {
+      setAuthToken(activeToken);
+    } else if (accounts.length > 0) {
       const activeWithToken = accounts.find((a) => a.authToken);
       if (activeWithToken?.authToken) {
         setAuthToken(activeWithToken.authToken);
       }
     }
-  }, [accounts, authToken]);
+  }, [accounts]);
+
+  const activeAccount = getActiveAccount() || accounts.find((a) => a.authToken) || accounts[0];
 
   const categories = [
     { id: 'all', label: 'كافة الفعاليات الرسمية' },
@@ -156,7 +162,7 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
     setFetchError(null);
     setFetchSuccessInfo(null);
 
-    const cleanToken = authToken.trim();
+    const cleanToken = getActiveBearerToken() || authToken.trim();
     const headers: Record<string, string> = {
       'Accept': 'application/json',
     };
@@ -495,47 +501,39 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
               </span>
             </div>
 
-            {/* Authorization Token Input */}
+            {/* Automatic Authorization Bearer Token Status Indicator */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-medium text-slate-300 flex items-center gap-1">
-                  <Key className="w-3.5 h-3.5 text-amber-400" />
-                  <span>رمز التوثيق (Authorization Token / Bearer):</span>
+                <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>رمز التوثيق (Authorization: Bearer):</span>
                 </label>
 
-                {accounts.length > 0 && (
-                  <div className="flex items-center gap-1 text-[10px]">
-                    <span className="text-slate-500">حساباتك:</span>
-                    {accounts.slice(0, 2).map((acc) => (
-                      <button
-                        key={acc.id}
-                        type="button"
-                        onClick={() => {
-                          if (acc.authToken) setAuthToken(acc.authToken);
-                        }}
-                        className="text-purple-400 hover:text-purple-300 underline font-mono cursor-pointer"
-                        title="استخدام توكن هذا الحساب"
-                      >
-                        {acc.email.split('@')[0]}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <div className="flex items-center gap-1 text-[10px]">
+                  <span className="text-emerald-400 font-bold bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    <span>محاقن تلقائياً من مدير الحسابات</span>
+                  </span>
+                </div>
               </div>
 
-              <input
-                type="text"
-                value={authToken}
-                onChange={(e) => {
-                  setAuthToken(e.target.value);
-                  setFetchError(null);
-                }}
-                placeholder="الصق هنا رمز التوثيق (Auth Bearer Token) إن وُجد..."
-                className="w-full bg-slate-900 border border-slate-700 focus:border-purple-500 rounded-xl px-3.5 py-2.5 text-xs text-amber-200 font-mono focus:outline-none transition shadow-inner"
-                dir="ltr"
-              />
+              <div className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-3.5 py-2.5 text-xs text-emerald-300 font-mono flex items-center justify-between shadow-inner">
+                <div className="flex items-center gap-2 truncate">
+                  <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                  <span className="truncate">
+                    {authToken 
+                      ? `${authToken.substring(0, 16)}••••••••${authToken.substring(authToken.length - 8)}` 
+                      : 'نشط ومفعل تلقائياً من حالة مدير الحسابات'}
+                  </span>
+                </div>
+                {activeAccount && (
+                  <span className="text-[10px] text-slate-400 font-sans shrink-0 bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700">
+                    {activeAccount.email}
+                  </span>
+                )}
+              </div>
               <span className="text-[10px] text-slate-400 mt-1 block">
-                يتم إرسال هذا الرمز كـ <code className="text-emerald-400 font-mono">Authorization: Bearer [token]</code> في ترويسة الطلب الفعلي.
+                يتم قراءة وحقن رمز التوثيق تلقائياً في ترويسة <code className="text-emerald-400 font-mono">Authorization: Bearer [token]</code> لجميع الطلبات دون الحاجة للإدخال اليدوي.
               </span>
             </div>
           </div>

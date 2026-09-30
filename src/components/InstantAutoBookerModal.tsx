@@ -13,6 +13,7 @@ import {
 } from '../utils/webookUrls';
 import { playReservationChime } from '../utils/audioAlert';
 import { ReservationFallbackCard } from './ReservationFallbackCard';
+import { getActiveBearerToken } from '../utils/authManager';
 
 interface InstantAutoBookerModalProps {
   isOpen: boolean;
@@ -60,9 +61,9 @@ export const InstantAutoBookerModal: React.FC<InstantAutoBookerModalProps> = ({
   const directBookingUrl = getWebookBookingUrl(event);
   const effectiveEmail = selectedEmail || manualEmail.trim();
 
-  // Find matching account to get auth token
+  // Find matching account or active token to get auth token
   const matchedAccount = accounts.find((a) => a.email === effectiveEmail) || accounts[0];
-  const effectiveAuthToken = matchedAccount?.authToken;
+  const effectiveAuthToken = getActiveBearerToken() || matchedAccount?.authToken;
 
   const handleCopyInjector = () => {
     const script = generateOfficialCartInjectionScript(event, [], ticketQuantity || 2);

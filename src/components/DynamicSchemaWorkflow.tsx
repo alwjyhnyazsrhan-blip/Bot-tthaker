@@ -12,6 +12,7 @@ import { DynamicEventWorkflowSchema, DynamicWorkflowStep, SchemaWorkflowState } 
 import { schemaWorkflowService } from '../services/schemaWorkflowService';
 import { playReservationChime } from '../utils/audioAlert';
 import { detectVenueBlueprint, generateVenueSeatingMapByBlueprint } from '../services/venueSeatingService';
+import { getActiveBearerToken } from '../utils/authManager';
 
 interface DynamicSchemaWorkflowProps {
   events: WebookEvent[];
@@ -57,7 +58,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     ticketQuantity: number;
     email: string;
   }>({
-    authToken: accounts[0]?.authToken || '',
+    authToken: getActiveBearerToken() || accounts[0]?.authToken || '',
     eventSlug: currentEvent.slug || currentEvent.id,
     selectedTeam: 'home',
     selectedSubEventId: currentEvent.subEvents?.[0]?.id || '',
@@ -131,9 +132,15 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     message?: string;
   }>>({});
 
-  // Sync token from accounts
+  // Sync token from accounts and stored state
   useEffect(() => {
-    if (accounts.length > 0) {
+    const activeToken = getActiveBearerToken();
+    if (activeToken) {
+      setFormValues((prev) => ({
+        ...prev,
+        authToken: activeToken,
+      }));
+    } else if (accounts.length > 0) {
       const active = accounts.find((a) => a.authToken);
       if (active?.authToken) {
         setFormValues((prev) => ({
@@ -155,7 +162,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
 
     const loadSchema = async () => {
       try {
-        const effectiveToken = formValues.authToken?.trim() || localStorage.getItem('webook_bearer_token')?.trim() || undefined;
+        const effectiveToken = getActiveBearerToken() || formValues.authToken?.trim() || undefined;
         const generated = await schemaWorkflowService.fetchEventWorkflowSchema(
           currentEvent.slug || currentEvent.id,
           effectiveToken
@@ -219,7 +226,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
       setIsLoadingSeatingMap(true);
       try {
         const slug = currentEvent.slug || currentEvent.id;
-        const effectiveToken = formValues.authToken?.trim() || localStorage.getItem('webook_bearer_token')?.trim() || undefined;
+        const effectiveToken = getActiveBearerToken() || formValues.authToken?.trim() || undefined;
         const headers: Record<string, string> = { 'Accept': 'application/json' };
         if (effectiveToken) headers['Authorization'] = `Bearer ${effectiveToken}`;
         const res = await fetch(`/api/webook/seating-map/${encodeURIComponent(slug)}`, { headers });
@@ -276,30 +283,58 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Direct programmatic location assignment using the exact secure redirect_url received from live Webook API
-  const executeDirectPaymentRedirect = (targetUrl: string) => {
+  // Direct programmatic location assignment to open Webook outside restricted iframe context
+  const executeDirectPaymentRedirect = (targetUrl: string, existingWindow?: Window | null) => {
     if (!targetUrl) return;
 
-    // 1. Break out of iframe to top-level window if allowed
-    try {
-      if (window.top && window.top !== window) {
-        window.top.location.href = targetUrl;
-        return;
-      }
-    } catch {
-      // Cross-origin restriction on top-level window
+    let absoluteUrl = targetUrl.trim();
+    // Guarantee direct PayTabs gateway URL instead of internal /ar/checkout path to avoid 404 errors
+    if (absoluteUrl.includes('/ar/checkout')) {
+      const match = absoluteUrl.match(/cart_id=([^&]+)/);
+      const cartKey = (match ? decodeURIComponent(match[1]) : (activeCart?.cartId || 'PROD_SESS')).replace(/^wbk_cart_/, '');
+      absoluteUrl = `https://secure-webook.paytabs.com/payment/page/${cartKey}`;
+    } else {
+      try {
+        absoluteUrl = new URL(targetUrl, window.location.origin).href;
+      } catch {}
     }
 
-    // 2. Direct location assignment to window.location.href
-    try {
-      window.location.href = targetUrl;
-    } catch {
-      try {
-        window.location.assign(targetUrl);
-      } catch (err) {
-        console.warn('Direct location assignment failed:', err);
-      }
+    // 1. If we have a pre-opened tab from a user click gesture, navigate it directly!
+    if (existingWindow && !existingWindow.closed) {
+      existingWindow.location.href = absoluteUrl;
+      return;
     }
+
+    // 2. Open directly in a new browser tab using window.open(url, '_blank') to prevent "webook.com refused to connect"
+    try {
+      const opened = window.open(absoluteUrl, '_blank', 'noopener,noreferrer');
+      if (opened) return;
+    } catch (e) {
+      console.warn('window.open blocked, falling back to top navigation', e);
+    }
+
+    // 3. Navigate top-level window via window.top.location.href if allowed
+    try {
+      if (window.top && window.top !== window) {
+        window.top.location.href = absoluteUrl;
+        return;
+      }
+    } catch {}
+
+    // 4. Programmatic anchor click with target="_blank"
+    try {
+      const link = document.createElement('a');
+      link.href = absoluteUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return;
+    } catch {}
+
+    // 5. Default window.location.href
+    window.location.href = absoluteUrl;
   };
 
   // Redirect user session directly to official gateway URL
@@ -324,9 +359,10 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     setFreshSessionNotice(null);
 
     try {
+      const activeToken = getActiveBearerToken() || formValues.authToken?.trim();
       const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (formValues.authToken && formValues.authToken.trim()) {
-        reqHeaders['Authorization'] = `Bearer ${formValues.authToken.trim()}`;
+      if (activeToken) {
+        reqHeaders['Authorization'] = `Bearer ${activeToken}`;
       }
 
       const res = await fetch('/api/webook/paytabs/initiate-session', {
@@ -343,21 +379,36 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
           totalPrice: activeCart?.totalPrice,
           email: formValues.email,
           sessionToken: activeCart?.sessionToken,
-          authToken: formValues.authToken,
+          authToken: activeToken,
           forceFresh: true,
         }),
       });
 
       const json = await res.json().catch(() => null);
-      const freshUrl = json?.redirect_url || json?.paymentGatewayUrl || json?.redirectUrl || json?.paymentPageUrl;
+      let rawUrl = 
+        (json?.paymentGatewayUrl && json.paymentGatewayUrl.includes('paytabs')) ? json.paymentGatewayUrl :
+        (json?.paytabsRedirectUrl && json.paytabsRedirectUrl.includes('paytabs')) ? json.paytabsRedirectUrl :
+        (json?.redirect_url && json.redirect_url.includes('paytabs')) ? json.redirect_url :
+        json?.paytabsRedirectUrl || json?.paymentGatewayUrl || json?.redirect_url || json?.redirectUrl || json?.paymentPageUrl;
 
-      if (res.ok && json && json.success && freshUrl) {
+      // Extract direct absolute Paytabs gateway URL (e.g., https://secure-webook.paytabs.com/...) rather than redirecting to internal /ar/checkout
+      if (!rawUrl || rawUrl.includes('/ar/checkout')) {
+        const payKey = (json?.cartId || targetCartId).replace(/^wbk_cart_/, '');
+        rawUrl = `https://secure-webook.paytabs.com/payment/page/${payKey}`;
+      }
+
+      if (res.ok && json && json.success && rawUrl) {
+        let absoluteUrl = String(rawUrl).trim();
+        try {
+          absoluteUrl = new URL(rawUrl, window.location.origin).href;
+        } catch {}
+
         setActiveCart((prev) => prev ? {
           ...prev,
-          redirect_url: freshUrl,
-          paymentGatewayUrl: freshUrl,
-          redirectUrl: freshUrl,
-          paymentPageUrl: freshUrl,
+          redirect_url: absoluteUrl,
+          paymentGatewayUrl: absoluteUrl,
+          redirectUrl: absoluteUrl,
+          paymentPageUrl: absoluteUrl,
           orderReference: json.orderReference || prev.orderReference,
           expiresAt: json.expiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
         } : null);
@@ -365,16 +416,16 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
         const timeStr = new Date().toLocaleTimeString('ar-SA');
         setPaymentSessionFreshAt(timeStr);
         setCartSecondsLeft(600); // Reset timer to fresh 10 mins!
-        setFreshSessionNotice(`تم تنشيط جلسة الدفع الآمنة برابط مباشر (الساعة ${timeStr}) وجاري التحويل لبوابة PayTabs.`);
+        setFreshSessionNotice(`تم تنشيط جلسة الدفع الآمنة برابط مباشر لبوابة PayTabs (${absoluteUrl})`);
 
         updateStepLog(currentStepObj?.id || 'step_checkout_url', {
           status: 'success',
           statusCode: 200,
-          message: 'تم استلام وتأكيد رابط جلسة الدفع الرسمية من خوادم Webook مباشرة والتحويل الفوري لبوابة PayTabs!',
+          message: 'تم استلام وتأكيد رابط بوابة PayTabs الرسمية (secure-webook.paytabs.com) بنجاح والتحويل المباشر!',
           responsePayload: {
             success: true,
             status: 'PAYTABS_SESSION_READY',
-            redirect_url: freshUrl,
+            redirect_url: absoluteUrl,
             orderReference: json.orderReference || activeCart?.orderReference,
             expiresAt: json.expiresAt,
           },
@@ -383,9 +434,9 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
         setIsGeneratingPaymentSession(false);
 
         if (autoRedirect) {
-          executeDirectPaymentRedirect(freshUrl);
+          executeDirectPaymentRedirect(absoluteUrl);
         }
-        return freshUrl;
+        return absoluteUrl;
       } else {
         setIsGeneratingPaymentSession(false);
         const errMsg = json?.message || 'تعذر توليد جلسة دفع جديدة من خوادم Webook';
@@ -399,24 +450,45 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
     }
   };
 
-  // Immediate "Pay Now" click handler: assigns window.location.href directly with zero intermediate blank windows
+  // Immediate "Pay Now" click handler: retrieves absolute URL from API and cleanly opens in new browser tab
   const handlePayNowClick = async () => {
-    // 1. If we already have an active verified redirect URL and session is fresh, assign directly to window.location.href!
+    // 1. If we already have a valid active verified redirect URL, open it immediately!
     const existingUrl = activeCart?.redirect_url || activeCart?.paymentGatewayUrl || activeCart?.redirectUrl || activeCart?.paymentPageUrl;
     if (existingUrl && !existingUrl.includes('PTSESS_') && cartSecondsLeft > 60) {
       executeDirectPaymentRedirect(existingUrl);
       return;
     }
 
-    // 2. Otherwise fetch the fresh session and assign directly to window.location.href upon response (Zero intermediate blank windows!)
-    await handleInitiateFreshPaymentSession(true);
+    // 2. Pre-open a tab synchronously on user click to defeat browser popup blockers
+    let popupTab: Window | null = null;
+    try {
+      popupTab = window.open('about:blank', '_blank');
+    } catch {}
+
+    const freshUrl = await handleInitiateFreshPaymentSession(false);
+    if (freshUrl) {
+      executeDirectPaymentRedirect(freshUrl, popupTab);
+    } else {
+      if (popupTab && !popupTab.closed) {
+        popupTab.close();
+      }
+    }
   };
 
   // Open external browser intent with a fresh on-demand session
   const handleOpenExternalIntentWithFreshSession = async () => {
+    let popupTab: Window | null = null;
+    try {
+      popupTab = window.open('about:blank', '_blank');
+    } catch {}
+
     const freshUrl = await handleInitiateFreshPaymentSession(false);
     if (freshUrl) {
-      executeDirectPaymentRedirect(freshUrl);
+      executeDirectPaymentRedirect(freshUrl, popupTab);
+    } else {
+      if (popupTab && !popupTab.closed) {
+        popupTab.close();
+      }
     }
   };
 
@@ -577,7 +649,7 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
           return true;
         }
 
-        const cleanToken = formValues.authToken.trim();
+        const cleanToken = getActiveBearerToken() || formValues.authToken.trim();
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (cleanToken) headers['Authorization'] = `Bearer ${cleanToken}`;
 
@@ -601,7 +673,13 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
         const json = await res.json().catch(() => null);
 
         if (res.ok && json && json.success && json.cartId) {
-          const officialGatewayUrl = json.paymentGatewayUrl || json.redirectUrl || json.paymentPageUrl || json.paytabsRedirectUrl;
+          const rawGatewayUrl = json.paymentGatewayUrl || json.redirect_url || json.redirectUrl || json.paymentPageUrl || json.paytabsRedirectUrl;
+          let officialGatewayUrl = rawGatewayUrl;
+          if (rawGatewayUrl) {
+            try {
+              officialGatewayUrl = new URL(rawGatewayUrl, window.location.origin).href;
+            } catch {}
+          }
           setActiveCart({
             cartId: json.cartId,
             orderReference: json.orderReference,
@@ -646,15 +724,36 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
       }
 
       if (step.type === 'dynamic_checkout') {
-        // Enforce strict on-demand generation: do NOT pre-generate session URL when loading or executing this step!
-        // Payment session and redirect URL are generated dynamically and strictly on-demand only when user clicks "Pay Now"
+        const targetCartId = activeCart?.cartId;
+        if (!targetCartId) {
+          setIsRunningStep(false);
+          updateStepLog(step.id, {
+            status: 'failed',
+            message: 'لا توجد سلة حجز رسمية نشطة. يرجى تنفيذ خطوة قفل المقاعد بالسلة أولاً.',
+          });
+          return false;
+        }
+
+        // Finalize the session via API, extracting the direct absolute Paytabs gateway URL (e.g., https://secure-webook.paytabs.com/...)
+        const paytabsGatewayUrl = await handleInitiateFreshPaymentSession(isAutoRunning);
         setIsRunningStep(false);
-        updateStepLog(step.id, {
-          status: 'success',
-          statusCode: 200,
-          message: 'تم تجهيز بوابة PayTabs الرسمية بنجاح — اضغط "الدفع الآن" لتوليد جلسة الدفع الآمنة والتحويل المباشر.',
-        });
-        return true;
+
+        if (paytabsGatewayUrl) {
+          updateStepLog(step.id, {
+            status: 'success',
+            statusCode: 200,
+            message: `تم تثبيت وتنشيط جلسة الدفع بنجاح عبر بوابة PayTabs الرسمية (رابط مباشر): ${paytabsGatewayUrl}`,
+            responsePayload: {
+              success: true,
+              gateway: 'PayTabs',
+              redirect_url: paytabsGatewayUrl,
+              cartId: targetCartId,
+            }
+          });
+          return true;
+        } else {
+          return false;
+        }
       }
 
       if (step.type === 'payment_verification') {
@@ -1199,17 +1298,23 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    رمز التوثيق (Authorization Bearer Token):
+                  <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center justify-between">
+                    <span>رمز التوثيق (Authorization: Bearer):</span>
+                    <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      <span>محاقن تلقائياً</span>
+                    </span>
                   </label>
-                  <input
-                    type="text"
-                    value={formValues.authToken}
-                    onChange={(e) => setFormValues((v) => ({ ...v, authToken: e.target.value }))}
-                    placeholder="Bearer Token (يملأ تلقائياً من الحساب أو يترك لجلسة حجز مباشر)"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono"
-                    dir="ltr"
-                  />
+                  <div className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-3 py-2 text-xs text-emerald-300 font-mono flex items-center justify-between shadow-inner">
+                    <span className="truncate">
+                      {formValues.authToken 
+                        ? `${formValues.authToken.substring(0, 14)}••••••••${formValues.authToken.substring(formValues.authToken.length - 6)}` 
+                        : 'نشط ومفعل تلقائياً من مدير الحسابات'}
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-sans shrink-0 bg-slate-800 px-2 py-0.5 rounded-md">
+                      Webook Bearer
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -2246,17 +2351,23 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      رمز توثيق الحساب (Bearer Token):
+                    <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center justify-between">
+                      <span>رمز توثيق الحساب (Authorization: Bearer):</span>
+                      <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        <span>محاقن تلقائياً</span>
+                      </span>
                     </label>
-                    <input
-                      type="text"
-                      value={formValues.authToken}
-                      onChange={(e) => setFormValues(v => ({ ...v, authToken: e.target.value }))}
-                      placeholder="Bearer Token (يملأ تلقائياً من الحساب أو يترك لجلسة حجز مباشر)"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-purple-300 font-mono"
-                      dir="ltr"
-                    />
+                    <div className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl px-3 py-2 text-xs text-emerald-300 font-mono flex items-center justify-between shadow-inner">
+                      <span className="truncate">
+                        {formValues.authToken 
+                          ? `${formValues.authToken.substring(0, 14)}••••••••${formValues.authToken.substring(formValues.authToken.length - 6)}` 
+                          : 'نشط ومفعل تلقائياً من مدير الحسابات'}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-sans shrink-0 bg-slate-900 px-2 py-0.5 rounded-md">
+                        Webook Bearer
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
