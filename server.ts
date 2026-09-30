@@ -296,79 +296,21 @@ async function startServer() {
       forceError 
     } = req.body;
 
-    // Handle custom user-provided payload directly if supplied
-    if (customPayload) {
-      try {
-        const parsed = typeof customPayload === 'string' ? JSON.parse(customPayload) : customPayload;
-        const customCartId = parsed.cartId || ('CUSTOM_CART_' + Date.now().toString(36).toUpperCase());
-        const cleanSlug = slug || eventId || 'event';
-        const capturedGatewayUrl = 
-          parsed.paymentGatewayUrl || 
-          parsed.redirectUrl || 
-          parsed.payment_url || 
-          parsed.payment_page_url || 
-          null;
-        const orderRef = parsed.orderReference || ('WBK-ORD-' + Date.now().toString(36).toUpperCase());
-        const totalPrice = parsed.totalPrice ?? (seats ? seats.reduce((s: number, x: any) => s + (x.price || 0), 0) : 0);
-
-        activeHoldsStore.set(customCartId, {
-          cartId: customCartId,
-          orderReference: orderRef,
-          eventId: cleanSlug,
-          slug: cleanSlug,
-          seatIds: seats ? seats.map((s: any) => s.id) : [],
-          seats: seats || [],
-          tickets: parsed.tickets || [],
-          perks: parsed.perks || [],
-          quantity: seats ? seats.length : 1,
-          totalPrice,
-          currency: 'SAR',
-          holdExpiresAt: parsed.holdExpiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-          paymentGatewayUrl: capturedGatewayUrl,
-          status: 'HOLD',
-          createdAt: new Date().toISOString(),
-        });
-
-        return res.json({
-          success: true,
-          isCustomPayload: true,
-          message: 'تم تطبيق استجابة الاختبار المخصصة المحددة يدوياً من قِبل المستخدم والتقاط رابط بوابة PayTabs الرسمية',
-          cartId: customCartId,
-          orderReference: orderRef,
-          holdExpiresAt: parsed.holdExpiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-          seats: parsed.seats || seats || [],
-          totalPrice,
-          paymentGatewayUrl: capturedGatewayUrl,
-          redirectUrl: capturedGatewayUrl,
-          paymentPageUrl: capturedGatewayUrl,
-          paytabsRedirectUrl: capturedGatewayUrl,
-          directBookingUrl: parsed.directBookingUrl || `https://webook.com/ar/events/${cleanSlug}/book?cart_id=${customCartId}`,
-          directCheckoutUrl: parsed.directCheckoutUrl || `https://webook.com/ar/checkout?cart_id=${customCartId}&event=${cleanSlug}`,
-          rawPayload: parsed
-        });
-      } catch (err: any) {
-        return res.status(400).json({
-          success: false,
-          message: `فشل قراءة حمولة JSON المخصصة: ${err.message}`
-        });
-      }
-    }
-
-    if (forceError) {
-      return res.status(502).json({
-        success: false,
-        message: 'محاكاة فشل استجابة API (لم يتم إرجاع أي مقاعد أو سلة نشطة من الخادم)',
-        endpoint: 'https://api.webook.com/api/v2/cart/add-to-cart?lang=ar',
-        seats
-      });
-    }
-
     const effectiveSeats = Array.isArray(seats) && seats.length > 0 ? seats : [];
     const effectiveQty = Number(quantity) || (effectiveSeats.length > 0 ? effectiveSeats.length : 1);
     const effectiveSlug = String(slug || eventId || '').trim() || 'take-give-0226-comedypod-2';
     const effectiveDate = selectedDate || date || '2026-10-15';
     const effectiveTime = selectedTime || time || '20:00 - 23:00';
     const effectiveToken = authToken || req.headers.authorization?.replace(/^Bearer\s+/i, '').trim() || sessionToken;
+
+    if (!effectiveToken) {
+      return res.status(401).json({
+        success: false,
+        statusCode: 401,
+        requiresToken: true,
+        message: 'رمز التوثيق (Bearer Token) مطلوب لتنفيذ حجز السلة في منصة Webook الرسمية. يرجى توفير رمز التوثيق الخاص بحسابك أولاً.'
+      });
+    }
     const effectiveTicketId = req.body.ticket_id || req.body.ticketId || req.body.event_ticket_id || (tickets && tickets[0]?.id) || (effectiveSeats[0]?.tierId) || 'regular';
 
     // Calculate total price based on selected seats or ticket tiers
@@ -478,12 +420,30 @@ async function startServer() {
       console.warn(`[WEBOOK REAL CART API] Network exception during real API call:`, netErr.message);
     }
 
+    // Strictly enforce real-time response from Webook official platform: ZERO local simulation!
+    if (!realCartId) {
+      const errorMsg = 
+        webookResponseJson?.message || 
+        webookResponseJson?.error || 
+        (webookResponseJson?.errors ? Object.values(webookResponseJson.errors).flat().join(' - ') : null) ||
+        'لم تُرجع واجهة برمجة Webook الرسمية معرّف سلة صالح (cart_id). يرجى توفير رمز التوثيق (Bearer Token) والتأكد من توافر التذاكر في المنصة.';
+
+      return res.status(webookResponseStatus >= 400 ? webookResponseStatus : 400).json({
+        success: false,
+        statusCode: webookResponseStatus,
+        message: typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg),
+        requiresToken: webookResponseStatus === 401 || webookResponseStatus === 403 || !effectiveToken,
+        endpoint: `${WEBOOK_API_BASE}/cart/add-to-cart?lang=ar`,
+        rawResponse: webookResponseJson,
+      });
+    }
+
     // Capture official payment gateway redirect URL or payment page URL directly from the API response
     const apiCapturedRedirectUrl = extractWebookPaymentUrl(webookResponseJson);
 
-    // Allocate verified active cart ID (using platform cart ID if returned, or canonical active prefix)
-    const cartId = realCartId || ('wbk_cart_' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase());
-    const orderReference = req.body.orderReference || ('WBK-ORD-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(100 + Math.random() * 900));
+    // Official active cart ID returned directly from Webook API
+    const cartId = realCartId;
+    const orderReference = req.body.orderReference || ('WBK-ORD-' + cartId.slice(-8).toUpperCase());
     const holdExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
     const seatIds = req.body.seatIds || effectiveSeats.map((s: any) => s.id || `seat-${s.row || 'A'}-${s.number || 1}`);
@@ -1098,26 +1058,67 @@ async function startServer() {
     });
   });
 
-  // Cached live catalog of real Webook events with verified pricing tiers
-  let cachedLiveEvents: any[] = [];
-  let lastLiveFetchTime = 0;
+  // Load official verified slugs from real_webook_urls.json
+  let officialWebookSlugs: string[] = [];
+  try {
+    const rawUrls = JSON.parse(fs.readFileSync(path.join(__dirname, 'real_webook_urls.json'), 'utf8'));
+    if (Array.isArray(rawUrls)) {
+      officialWebookSlugs = rawUrls.map((u: string) => {
+        const parts = u.split('/');
+        return parts[parts.length - 1];
+      }).filter(Boolean);
+    }
+  } catch (e: any) {
+    console.warn('[SERVER] Could not load real_webook_urls.json:', e.message);
+  }
 
-  const VERIFIED_LIVE_SLUGS = [
+  const DEFAULT_OFFICIAL_SLUGS = [
     'take-give-0226-comedypod-2',
     'kings-league-mena-round2-rs26-tickets',
-    'al-shabab-vs-al-faisaly-rsl-2627-r10',
-    'rsl-26-27-neom-vs-abha-24102026',
-    'rsl-r11-al-kholood-vs-al-ettifaq-24206',
-    'aquarabia-qiddiya-tickets',
-    'six-flags-new-2026',
     'afc-cup-27-chn-pack',
-    'twina-eid-event-26',
+    'six-flags-new-2026',
+    'aquarabia-qiddiya-tickets',
     'food-sphere',
     'thmanyah-very-sary-night-tickets',
     'lahd-yadri-osama-bazaid-in-alkhobar-0207',
     'semi-final-afc-pack-27',
     'e-prix-2027-day-1',
+    'al-shabab-vs-al-faisaly-rsl-2627-r10',
+    'rsl-26-27-neom-vs-abha-24102026',
+    'rsl-r11-al-kholood-vs-al-ettifaq-24206',
+    'twina-eid-event-26',
   ];
+
+  // Helper to fetch 100% official live event data from Webook API using user Bearer token
+  async function fetchOfficialWebookEvent(slug: string, userToken?: string) {
+    try {
+      const headers: Record<string, string> = {
+        'token': WEBOOK_PUBLIC_API_TOKEN,
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      };
+      if (userToken && userToken.trim()) {
+        headers['Authorization'] = `Bearer ${userToken.trim()}`;
+      }
+      const response = await fetch(`${WEBOOK_API_BASE}/events/${encodeURIComponent(slug)}`, {
+        headers,
+      });
+
+      if (!response.ok) {
+        console.warn(`[WEBOOK API] HTTP ${response.status} for event ${slug}`);
+        return null;
+      }
+
+      const json = await response.json();
+      if (json && (json.status === 'success' || json.status === 'ok' || json.data) && json.data) {
+        return json.data;
+      }
+      return null;
+    } catch (err: any) {
+      console.error(`[WEBOOK API] Error fetching event ${slug}:`, err.message);
+      return null;
+    }
+  }
 
   function extractEventTeams(raw: any): { home: { name: string; nameAr: string; color?: string }; away: { name: string; nameAr: string; color?: string } } | undefined {
     if (raw.home_team && raw.away_team && (raw.home_team.name || raw.home_team.name_ar)) {
@@ -1152,119 +1153,114 @@ async function startServer() {
   }
 
   function extractSubEvents(raw: any, dates: string[], times: string[], teams?: any): any[] {
-    const slug = raw.slug || 'event';
-    if (raw.sub_events && Array.isArray(raw.sub_events) && raw.sub_events.length > 0) {
+    const slug = raw?.slug || 'event';
+    if (raw?.sub_events && Array.isArray(raw.sub_events) && raw.sub_events.length > 0) {
       return raw.sub_events.map((se: any, idx: number) => ({
         id: se._id || se.id || `sub_${slug}_${idx + 1}`,
         title: se.title || `الجلسة / المباراة ${idx + 1}`,
         titleAr: se.title_ar || se.title || `الجلسة / المباراة ${idx + 1}`,
-        date: se.date || dates[idx % dates.length] || '2026-10-15',
-        time: se.time || times[idx % times.length] || '20:00 - 22:30',
+        date: se.date || (dates && dates[idx % dates.length]) || '',
+        time: se.time || (times && times[idx % times.length]) || '',
         teams,
         venueName: se.venue_name || raw.venue_name || 'Webook Official Venue',
         venueNameAr: se.venue_name || raw.venue_name || 'المقر الرسمي للفعالية',
       }));
     }
 
-    const effectiveDates = (dates && dates.length > 0) ? dates : ['2026-10-15', '2026-10-16'];
-    return effectiveDates.map((dateStr, idx) => {
-      let subTitle = `الجلسة الرئيسية (${dateStr})`;
-      if (teams) {
-        subTitle = `مباراة: ${teams.home.nameAr} ضد ${teams.away.nameAr} - الجولة ${idx + 1}`;
-      } else if (/comedy|pod|كوميديا|مسرح|theater|show/i.test(`${raw.title} ${raw.slug}`)) {
-        subTitle = `العرض المسرحي - الفترة ${idx + 1} (${dateStr})`;
-      } else if (/music|concert|sing|حفل/i.test(`${raw.title} ${raw.slug}`)) {
-        subTitle = `الحفل الغنائي المباشر - الليلة ${idx + 1}`;
-      }
-      return {
-        id: `sub_${slug}_${idx + 1}`,
-        title: subTitle,
-        titleAr: subTitle,
-        date: dateStr,
-        time: times[idx % times.length] || '20:00 - 23:00',
-        teams,
-        venueName: raw.venue_name || 'Webook Official Venue',
-        venueNameAr: raw.venue_name || 'المقر الرسمي للفعالية',
-      };
-    });
+    return [];
   }
 
-  async function getOrFetchLiveWebookEvents(userToken?: string) {
-    const now = Date.now();
-    // Cache for 2 minutes to keep response snappy while always providing real live data
-    if (cachedLiveEvents.length > 0 && (now - lastLiveFetchTime < 120000)) {
-      return cachedLiveEvents;
-    }
+  // 100% STRICT REAL-TIME CATALOG FETCHER (Zero cached catalogs, zero local simulation)
+  async function getOrFetchLiveWebookEvents(userToken?: string, options?: { limit?: number; search?: string; slugs?: string[] }) {
+    let targetSlugs: string[] = [];
 
-    const fetchedEvents: any[] = [];
-    for (const slug of VERIFIED_LIVE_SLUGS) {
-      try {
-        const raw = await fetchOfficialWebookEvent(slug);
-        if (raw && (raw.title || raw.slug)) {
-          const rawTickets = raw.event_tickets || [];
-          const realTiers = rawTickets.map((t: any) => {
-            const basePrice = Number(t.price || 0);
-            const vat = Number(t.vat || 0);
-            const totalPrice = Math.round((basePrice + vat) * 100) / 100;
-            return {
-              id: t._id || t.shortcode || String(t.title),
-              name: t.title,
-              nameAr: t.title,
-              price: totalPrice,
-              basePrice,
-              vat,
-              currency: t.currency || 'SAR',
-              remaining: t.remaining ?? t.quantity ?? 10,
-              available: !t.sold_out && (t.remaining === undefined || t.remaining > 0),
-              ticketColor: t.ticket_color || '#2563eb',
-              description: t.description ? t.description.replace(/<[^>]*>/g, '').trim() : '',
-            };
-          });
-
-          const isSports = /sport|league|rsl|derby|match|afc|cup|vs/i.test(`${raw.slug} ${raw.title}`);
-          const isConcert = /music|concert|sing|jalsat/i.test(`${raw.slug} ${raw.title}`);
-          const isTheater = /theater|comedy|show/i.test(`${raw.slug} ${raw.title}`);
-
-          const rawDates = Array.isArray(raw.time_slots) && raw.time_slots.length > 0
-            ? raw.time_slots.filter((d: any) => typeof d === 'string')
-            : ['2026-10-15', '2026-10-16', '2026-10-20'];
-          
-          const rawTimes = ['18:00 - 20:30', '20:30 - 23:00', '21:00 - 23:30'];
-          const extractedTeams = extractEventTeams(raw);
-          const subEvents = extractSubEvents(raw, rawDates, rawTimes, extractedTeams);
-
-          fetchedEvents.push({
-            id: raw.slug || slug,
-            title: raw.title,
-            titleAr: raw.title,
-            slug: raw.slug || slug,
-            url: `https://webook.com/ar/events/${raw.slug || slug}`,
-            category: isSports ? 'رياضة ومباريات' : isConcert ? 'حفلات وموسيقى' : isTheater ? 'مسرح وكوميديا' : 'مناطق وتجارب ترفيهية',
-            location: raw.venue_name || raw.city || 'المملكة العربية السعودية',
-            locationAr: raw.venue_name || raw.address || raw.city || 'الرياض، المملكة العربية السعودية',
-            date: raw.start_date_time_str || 'متاح للحجز الفوري',
-            datesAvailable: rawDates,
-            timesAvailable: rawTimes,
-            image: raw.mobile_poster || raw.poster || raw.promo_poster || 'https://images.unsplash.com/photo-1540039155733-5bb30b53aa14?q=80&w=800&auto=format&fit=crop',
-            descriptionAr: raw.description ? raw.description.replace(/<[^>]*>/g, '').trim() : '',
-            isHot: true,
-            tiers: realTiers,
-            isSeated: Boolean(raw.is_seated),
-            seatsIo: raw.seats_io || null,
-            teams: extractedTeams,
-            subEvents,
-          });
-        }
-      } catch (err: any) {
-        console.warn(`[WEBOOK LIVE CATALOG] Error fetching ${slug}:`, err.message);
+    if (options?.slugs && Array.isArray(options.slugs) && options.slugs.length > 0) {
+      targetSlugs = options.slugs;
+    } else if (options?.search && options.search.trim()) {
+      const q = options.search.toLowerCase().trim();
+      targetSlugs = officialWebookSlugs.filter((s) => s.toLowerCase().includes(q));
+      if (targetSlugs.length === 0) {
+        targetSlugs = [q];
       }
+    } else {
+      targetSlugs = DEFAULT_OFFICIAL_SLUGS;
     }
 
-    if (fetchedEvents.length > 0) {
-      cachedLiveEvents = fetchedEvents;
-      lastLiveFetchTime = now;
-    }
-    return fetchedEvents;
+    const limit = options?.limit || 20;
+    const slugsToFetch = targetSlugs.slice(0, limit);
+
+    console.log(`[WEBOOK LIVE CATALOG] Fetching ${slugsToFetch.length} official events in real-time from api.webook.com (token present: ${Boolean(userToken)})...`);
+
+    const fetchedResults = await Promise.all(
+      slugsToFetch.map(async (slug) => {
+        try {
+          const raw = await fetchOfficialWebookEvent(slug, userToken);
+          if (raw && (raw.title || raw.slug)) {
+            const rawTickets = raw.event_tickets || [];
+            const realTiers = rawTickets.map((t: any) => {
+              const basePrice = Number(t.price || 0);
+              const vat = Number(t.vat || 0);
+              const totalPrice = Math.round((basePrice + vat) * 100) / 100;
+              return {
+                id: t._id || t.shortcode || String(t.title),
+                name: t.title,
+                nameAr: t.title,
+                price: totalPrice,
+                basePrice,
+                vat,
+                currency: t.currency || 'SAR',
+                remaining: t.remaining ?? t.quantity ?? 0,
+                available: !t.sold_out && (t.remaining === undefined || t.remaining > 0),
+                ticketColor: t.ticket_color || '#2563eb',
+                description: t.description ? t.description.replace(/<[^>]*>/g, '').trim() : '',
+              };
+            });
+
+            const isSports = /sport|league|rsl|derby|match|afc|cup|vs/i.test(`${raw.slug} ${raw.title}`);
+            const isConcert = /music|concert|sing|jalsat/i.test(`${raw.slug} ${raw.title}`);
+            const isTheater = /theater|comedy|show/i.test(`${raw.slug} ${raw.title}`);
+
+            const rawDates = Array.isArray(raw.time_slots) && raw.time_slots.length > 0
+              ? raw.time_slots.filter((d: any) => typeof d === 'string')
+              : (raw.start_date_time_str ? [raw.start_date_time_str] : []);
+            
+            const rawTimes = Array.isArray(raw.show_times) && raw.show_times.length > 0
+              ? raw.show_times.filter((t: any) => typeof t === 'string')
+              : [];
+            const extractedTeams = extractEventTeams(raw);
+            const subEvents = extractSubEvents(raw, rawDates, rawTimes, extractedTeams);
+
+            return {
+              id: raw.slug || slug,
+              title: raw.title,
+              titleAr: raw.title,
+              slug: raw.slug || slug,
+              url: `https://webook.com/ar/events/${raw.slug || slug}`,
+              category: isSports ? 'رياضة ومباريات' : isConcert ? 'حفلات وموسيقى' : isTheater ? 'مسرح وكوميديا' : 'مناطق وتجارب ترفيهية',
+              location: raw.venue_name || raw.city || 'المملكة العربية السعودية',
+              locationAr: raw.venue_name || raw.address || raw.city || 'الرياض، المملكة العربية السعودية',
+              date: raw.start_date_time_str || (rawDates[0] || 'متاح للحجز الفوري'),
+              datesAvailable: rawDates,
+              timesAvailable: rawTimes,
+              image: raw.mobile_poster || raw.poster || raw.promo_poster || 'https://images.unsplash.com/photo-1540039155733-5bb30b53aa14?q=80&w=800&auto=format&fit=crop',
+              descriptionAr: raw.description ? raw.description.replace(/<[^>]*>/g, '').trim() : '',
+              isHot: true,
+              tiers: realTiers,
+              isSeated: Boolean(raw.is_seated),
+              seatsIo: raw.seats_io || null,
+              teams: extractedTeams,
+              subEvents,
+            };
+          }
+          return null;
+        } catch (err: any) {
+          console.warn(`[WEBOOK LIVE CATALOG] Error fetching ${slug}:`, err.message);
+          return null;
+        }
+      })
+    );
+
+    return fetchedResults.filter(Boolean);
   }
 
   // API endpoint: Live event catalog fetched directly from platform with Bearer token authentication
@@ -1373,40 +1369,19 @@ async function startServer() {
     }
   });
 
-  // Helper to fetch 100% official live event data from Webook API
-  async function fetchOfficialWebookEvent(slug: string) {
-    try {
-      const response = await fetch(`${WEBOOK_API_BASE}/events/${slug}`, {
-        headers: {
-          'token': WEBOOK_PUBLIC_API_TOKEN,
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        },
-      });
-
-      if (!response.ok) {
-        console.warn(`[WEBOOK API] HTTP ${response.status} for event ${slug}`);
-        return null;
-      }
-
-      const json = await response.json();
-      if (json && json.status === 'success' && json.data) {
-        return json.data;
-      }
-      return null;
-    } catch (err: any) {
-      console.error(`[WEBOOK API] Error fetching event ${slug}:`, err.message);
-      return null;
-    }
-  }
-
   // API endpoint: Fetch 100% official event data, real prices and tickets directly from Webook API
   app.get('/api/webook/real-event/:slug', async (req, res) => {
     try {
       const { slug } = req.params;
-      const data = await fetchOfficialWebookEvent(slug);
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || (typeof req.query.token === 'string' ? req.query.token.trim() : undefined) || process.env.WEBOOK_BEARER_TOKEN;
+
+      const data = await fetchOfficialWebookEvent(slug, token);
       if (!data) {
-        return res.status(404).json({ success: false, message: 'تعذر جلب الفعالية من خوادم Webook الرسمية' });
+        return res.status(404).json({ 
+          success: false, 
+          message: `تعذر جلب الفعالية (${slug}) من خوادم Webook الرسمية. تأكد من صحة الرابط أو رمز الفعالية وصلاحية رمز التوثيق.` 
+        });
       }
 
       const realTiers = (data.event_tickets || []).map((t: any) => {
@@ -1421,7 +1396,7 @@ async function startServer() {
           basePrice,
           vat,
           currency: t.currency || 'SAR',
-          remaining: t.remaining ?? t.quantity ?? 10,
+          remaining: t.remaining ?? t.quantity ?? 0,
           available: !t.sold_out && (t.remaining === undefined || t.remaining > 0),
           ticketColor: t.ticket_color || '#2563eb',
           description: t.description ? t.description.replace(/<[^>]*>/g, '').trim() : '',
@@ -1430,15 +1405,18 @@ async function startServer() {
 
       const rawDates = Array.isArray(data.time_slots) && data.time_slots.length > 0
         ? data.time_slots.filter((d: any) => typeof d === 'string')
-        : ['2026-10-15', '2026-10-16', '2026-10-20'];
+        : (data.start_date_time_str ? [data.start_date_time_str] : []);
       
-      const rawTimes = ['18:00 - 20:30', '20:30 - 23:00', '21:00 - 23:30'];
+      const rawTimes = Array.isArray(data.show_times) && data.show_times.length > 0
+        ? data.show_times.filter((t: any) => typeof t === 'string')
+        : [];
       const extractedTeams = extractEventTeams(data);
       const subEvents = extractSubEvents(data, rawDates, rawTimes, extractedTeams);
 
       return res.json({
         success: true,
         source: 'api.webook.com (Live Official Data)',
+        authenticated: Boolean(token),
         data: {
           id: data.slug || slug,
           title: data.title,
@@ -1468,7 +1446,16 @@ async function startServer() {
   app.get('/api/webook/seating-map/:slug', async (req, res) => {
     try {
       const { slug } = req.params;
-      const data = await fetchOfficialWebookEvent(slug);
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || (typeof req.query.token === 'string' ? req.query.token.trim() : undefined) || process.env.WEBOOK_BEARER_TOKEN;
+
+      const data = await fetchOfficialWebookEvent(slug, token);
+      if (!data) {
+        return res.status(404).json({
+          success: false,
+          message: `تعذر جلب مخطط مقاعد الفعالية (${slug}) من خوادم Webook الرسمية.`
+        });
+      }
 
       let realTiers: any[] = [];
       if (data && data.event_tickets && data.event_tickets.length > 0) {
@@ -1514,6 +1501,7 @@ async function startServer() {
       return res.json({
         success: true,
         source: 'api.webook.com (Live Seating Map & Categories)',
+        authenticated: Boolean(token),
         slug,
         venueBlueprint: blueprint,
         venueName: seatingMap.venueNameAr || data?.venue_name || 'المقر الرسمي للفعالية',
@@ -1664,70 +1652,63 @@ async function startServer() {
   app.get('/api/webook/event-workflow-schema/:slug', async (req, res) => {
     try {
       const { slug } = req.params;
-      const data = await fetchOfficialWebookEvent(slug);
-      
-      let eventTitle = slug;
-      let eventVenue = 'المملكة العربية السعودية';
-      let isSeated = false;
-      let seatsProvider = 'seats_io';
-      let seatsIoData: any = null;
-      let realTiers: any[] = [];
-      let rawDates: string[] = ['2026-10-15', '2026-10-16', '2026-10-20'];
-      let rawTimes: string[] = ['18:00 - 20:30', '20:30 - 23:00', '21:00 - 23:30'];
-      let extractedTeams: any = undefined;
-      let subEvents: any[] = [];
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || (typeof req.query.token === 'string' ? req.query.token.trim() : undefined) || process.env.WEBOOK_BEARER_TOKEN;
 
-      if (data) {
-        eventTitle = data.title || slug;
-        eventVenue = data.venue_name || data.address || data.city || eventVenue;
-        isSeated = Boolean(data.is_seated);
-        seatsProvider = data.seats_provider || seatsProvider;
-        seatsIoData = data.seats_io || null;
-
-        realTiers = (data.event_tickets || []).map((t: any) => {
-          const basePrice = Number(t.price || 0);
-          const vat = Number(t.vat || 0);
-          const totalPrice = Math.round((basePrice + vat) * 100) / 100;
-          return {
-            id: t._id || t.shortcode || String(t.title),
-            name: t.title,
-            nameAr: t.title,
-            price: totalPrice,
-            basePrice,
-            vat,
-            currency: t.currency || 'SAR',
-            remaining: t.remaining ?? t.quantity ?? 10,
-            available: !t.sold_out && (t.remaining === undefined || t.remaining > 0),
-            ticketColor: t.ticket_color || '#2563eb',
-            description: t.description ? t.description.replace(/<[^>]*>/g, '').trim() : '',
-          };
+      const data = await fetchOfficialWebookEvent(slug, token);
+      if (!data) {
+        return res.status(404).json({
+          success: false,
+          message: `تعذر جلب مخطط الفعالية (${slug}) من خوادم Webook الرسمية. تأكد من صحة الرابط أو رمز الفعالية وصلاحية رمز التوثيق.`
         });
+      }
+      
+      const eventTitle = data.title || slug;
+      const eventVenue = data.venue_name || data.address || data.city || 'المملكة العربية السعودية';
+      const isSeated = Boolean(data.is_seated);
+      const seatsProvider = data.seats_provider || 'seats_io';
+      const seatsIoData = data.seats_io || null;
 
-        if (Array.isArray(data.time_slots) && data.time_slots.length > 0) {
-          rawDates = data.time_slots.filter((d: any) => typeof d === 'string');
-        }
-        extractedTeams = extractEventTeams(data);
-        subEvents = extractSubEvents(data, rawDates, rawTimes, extractedTeams);
-      } else {
-        extractedTeams = /vs|derby|match|شبان|نصر|هلال|اتحاد/i.test(slug) ? {
-          home: { name: 'Al Hilal', nameAr: 'الهلال', color: '#2563eb' },
-          away: { name: 'Al Nassr', nameAr: 'النصر', color: '#eab308' },
-        } : undefined;
+      const realTiers = (data.event_tickets || []).map((t: any) => {
+        const basePrice = Number(t.price || 0);
+        const vat = Number(t.vat || 0);
+        const totalPrice = Math.round((basePrice + vat) * 100) / 100;
+        return {
+          id: t._id || t.shortcode || String(t.title),
+          name: t.title,
+          nameAr: t.title,
+          price: totalPrice,
+          basePrice,
+          vat,
+          currency: t.currency || 'SAR',
+          remaining: t.remaining ?? t.quantity ?? 0,
+          available: !t.sold_out && (t.remaining === undefined || t.remaining > 0),
+          ticketColor: t.ticket_color || '#2563eb',
+          description: t.description ? t.description.replace(/<[^>]*>/g, '').trim() : '',
+        };
+      });
+
+      let rawDates: string[] = [];
+      if (Array.isArray(data.time_slots) && data.time_slots.length > 0) {
+        rawDates = data.time_slots.filter((d: any) => typeof d === 'string');
+      } else if (data.start_date_time_str) {
+        rawDates = [data.start_date_time_str];
       }
 
-      if (realTiers.length === 0) {
-        realTiers = [
-          { id: 'regular', name: 'Regular Entry', nameAr: 'تذكرة الدخول الأساسية', price: 65, available: true, remaining: 50, currency: 'SAR', ticketColor: '#3b82f6' },
-          { id: 'vip', name: 'VIP Pass', nameAr: 'باقة كبار الشخصيات VIP', price: 250, available: true, remaining: 20, currency: 'SAR', ticketColor: '#ec4899' },
-        ];
+      let rawTimes: string[] = [];
+      if (Array.isArray(data.show_times) && data.show_times.length > 0) {
+        rawTimes = data.show_times.filter((t: any) => typeof t === 'string');
       }
+
+      const extractedTeams = extractEventTeams(data);
+      const subEvents = extractSubEvents(data, rawDates, rawTimes, extractedTeams);
 
       // Build dynamic workflow steps based ENTIRELY on event features mandated by Webook
       const steps: any[] = [];
       let stepNumber = 1;
 
       // 1. Teams Selection step (ONLY IF sports match with opposing teams)
-      if (extractedTeams) {
+      if (extractedTeams && extractedTeams.home && extractedTeams.away && (extractedTeams.home.name || extractedTeams.home.nameAr) && (extractedTeams.away.name || extractedTeams.away.nameAr)) {
         steps.push({
           id: 'step_team_selection',
           stepNumber: stepNumber++,
@@ -2057,52 +2038,47 @@ async function startServer() {
       let cleanUrl = target.startsWith('http') ? target : `https://webook.com/ar/events/${parsedSlug}`;
       cleanUrl = cleanUrl.replace(/\/book$/, '');
 
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || (typeof req.query?.token === 'string' ? (req.query.token as string).trim() : undefined) || process.env.WEBOOK_BEARER_TOKEN;
+
       // 1. ATTEMPT REAL-TIME FETCH FROM OFFICIAL WEBOOK API v2
       console.log(`[WEBOOK LIVE SYNC] Fetching real data for ${parsedSlug} from api.webook.com...`);
-      const officialData = await fetchOfficialWebookEvent(parsedSlug);
+      const officialData = await fetchOfficialWebookEvent(parsedSlug, token);
 
-      let tiers: any[] = [];
-      let eventTitle = '';
-      let eventVenue = '';
-      let eventPoster = '';
-      let eventDate = 'موسم 2026/2027 • متاح للحجز الفوري';
-      let isSeated = false;
-      let seatsIoData: any = null;
-
-      if (officialData) {
-        console.log(`[WEBOOK LIVE SYNC] Successfully retrieved official data for ${parsedSlug}: ${officialData.title}`);
-        eventTitle = officialData.title || parsedSlug;
-        eventVenue = officialData.venue_name || officialData.address || officialData.city || 'المملكة العربية السعودية';
-        eventPoster = officialData.mobile_poster || officialData.poster || officialData.promo_poster || '';
-        eventDate = officialData.start_date_time_str || eventDate;
-        isSeated = Boolean(officialData.is_seated);
-        seatsIoData = officialData.seats_io || null;
-
-        if (officialData.event_tickets && Array.isArray(officialData.event_tickets) && officialData.event_tickets.length > 0) {
-          tiers = officialData.event_tickets.map((t: any) => {
-            const basePrice = Number(t.price || 0);
-            const vat = Number(t.vat || 0);
-            const totalPrice = Math.round((basePrice + vat) * 100) / 100;
-            return {
-              id: t._id || t.shortcode || String(t.title),
-              name: t.title,
-              nameAr: t.title,
-              price: totalPrice,
-              basePrice,
-              vat,
-              currency: t.currency || 'SAR',
-              remaining: t.remaining ?? t.quantity ?? 10,
-              available: !t.sold_out && (t.remaining === undefined || t.remaining > 0),
-              ticketColor: t.ticket_color || '#2563eb',
-              description: t.description ? t.description.replace(/<[^>]*>/g, '').trim() : '',
-            };
-          });
-        }
+      if (!officialData) {
+        return res.status(404).json({
+          success: false,
+          message: `تعذر جلب الفعالية (${parsedSlug}) من خوادم Webook الرسمية. تأكد من صحة الرابط أو رمز الفعالية وصلاحية رمز التوثيق.`
+        });
       }
 
-      // If manual tiers provided and official API had no tickets, use manual
-      if ((!tiers || tiers.length === 0) && manualTiers && Array.isArray(manualTiers) && manualTiers.length > 0) {
-        tiers = manualTiers;
+      let tiers: any[] = [];
+      const eventTitle = officialData.title || parsedSlug;
+      const eventVenue = officialData.venue_name || officialData.address || officialData.city || 'المملكة العربية السعودية';
+      const eventPoster = officialData.mobile_poster || officialData.poster || officialData.promo_poster || '';
+      const eventDate = officialData.start_date_time_str || 'متاح للحجز الفوري';
+      const isSeated = Boolean(officialData.is_seated);
+      const seatsIoData = officialData.seats_io || null;
+
+      if (officialData.event_tickets && Array.isArray(officialData.event_tickets) && officialData.event_tickets.length > 0) {
+        tiers = officialData.event_tickets.map((t: any) => {
+          const basePrice = Number(t.price || 0);
+          const vat = Number(t.vat || 0);
+          const totalPrice = Math.round((basePrice + vat) * 100) / 100;
+          return {
+            id: t._id || t.shortcode || String(t.title),
+            name: t.title,
+            nameAr: t.title,
+            price: totalPrice,
+            basePrice,
+            vat,
+            currency: t.currency || 'SAR',
+            remaining: t.remaining ?? t.quantity ?? 0,
+            available: !t.sold_out && (t.remaining === undefined || t.remaining > 0),
+            ticketColor: t.ticket_color || '#2563eb',
+            description: t.description ? t.description.replace(/<[^>]*>/g, '').trim() : '',
+          };
+        });
       }
 
       // Determine category and venue blueprint from slug or name
@@ -2134,31 +2110,6 @@ async function startServer() {
         : 'مناطق وتجارب ترفيهية';
 
       const venueType = !isSeated ? 'zone' : isSports ? 'stadium' : isMusic ? 'concert' : isTheater ? 'theater' : 'zone';
-
-      // Fallback tiers only if both official API and manual tiers are empty
-      if (!tiers || tiers.length === 0) {
-        if (isSports) {
-          tiers = [
-            { id: 'cat3', name: 'Cat 3', nameAr: 'الدرجة الثالثة (أطراف الملعب)', price: 35, available: true },
-            { id: 'cat2', name: 'Cat 2', nameAr: 'الدرجة الثانية (خلف المرمى)', price: 70, available: true },
-            { id: 'cat1', name: 'Cat 1', nameAr: 'الدرجة الأولى (وسط الواجهة)', price: 150, available: true },
-            { id: 'vip', name: 'VIP Gold', nameAr: 'المنصة الذهبية والضيافة VIP', price: 650, available: true },
-          ];
-        } else if (isMusic) {
-          tiers = [
-            { id: 'bronze', name: 'Bronze', nameAr: 'المقاعد البرونزية العامة', price: 120, available: true },
-            { id: 'silver', name: 'Silver', nameAr: 'المقاعد الفضية', price: 250, available: true },
-            { id: 'gold', name: 'Gold', nameAr: 'الدائرة الذهبية (Golden Circle)', price: 550, available: true },
-            { id: 'royal', name: 'Royal VIP', nameAr: 'المنصة الملكية VIP', price: 1400, available: true },
-          ];
-        } else {
-          tiers = [
-            { id: 'regular', name: 'Regular', nameAr: 'تذكرة الدخول العامة (General Admission)', price: 45, available: true },
-            { id: 'fast_track', name: 'Fast Track', nameAr: 'المسار السريع (Fast Track Pass)', price: 120, available: true },
-            { id: 'vip', name: 'VIP Lounge', nameAr: 'لاونج كبار الشخصيات VIP', price: 350, available: true },
-          ];
-        }
-      }
 
       // Title formatting
       const titleAr = eventTitle || parsedSlug

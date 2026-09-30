@@ -16,83 +16,88 @@ export function parseEventJsonSchema(event: WebookEvent): EventJsonSchema {
   const hasMultipleDates = dates.length > 1;
   const tiers = event.tiers || [];
 
-  // Dynamically tailor the 5 steps according to the JSON schema:
-  const requiredSteps: DynamicPipelineStepConfig[] = [
-    {
-      id: 'step_catalog',
-      stepNumber: 1,
-      name: 'Fetch Catalog & Event Schema',
-      nameAr: 'استرجاع دليل الفعاليات ومخطط الـ JSON',
-      badgeAr: 'بيانات الفعالية الرسمية',
-      descriptionAr: `التحقق من الفعالية (${event.slug}) وجلب خصائصها ومحددات الحجز عبر واجهة Webook الرسمية`,
+  // Dynamically tailor the workflow steps according to the active event's schema data:
+  const requiredSteps: DynamicPipelineStepConfig[] = [];
+  let currentStepNum = 1;
+
+  // 1. Teams & Fan Stand (Sports matches with opposing teams only)
+  if (hasTeams && event.teams) {
+    requiredSteps.push({
+      id: 'step_team_selection',
+      stepNumber: currentStepNum++,
+      name: 'Select Match Teams & Fan Section',
+      nameAr: 'اختيار الفريق ومدرج المشجعين',
+      badgeAr: `مواجهة فرق: ${event.teams?.home.nameAr} ضد ${event.teams?.away.nameAr}`,
+      descriptionAr: `الفعالية عبارة عن مباراة كرة قدم رسمية تتطلب تحديد جهة المشجعين (${event.teams?.home.nameAr} أو ${event.teams?.away.nameAr})`,
       isMandatory: true,
       isApplicable: true,
-    },
-    {
-      id: 'step_subevent_session',
-      stepNumber: 2,
-      name: hasTeams
-        ? 'Select Match, Teams & Fan Section'
-        : hasSubEvents
-        ? 'Select Tournament Sub-event & Time Slot'
-        : 'Select Event Date & Time Slot',
-      nameAr: hasTeams
-        ? 'تحديد المباراة، الفريق المفضل، ومدرج الجماهير'
-        : hasSubEvents
-        ? 'تحديد الجولة/العرض الفرعي وتوقيت الدخول'
-        : 'تحديد موعد وتاريخ الفعالية الرسمي',
-      badgeAr: hasTeams
-        ? `مواجهة فرق: ${event.teams?.home.nameAr} ضد ${event.teams?.away.nameAr}`
-        : hasSubEvents
-        ? `${subEvents.length} عروض وجولات فرعية`
-        : 'تاريخ وفترة الدخول',
-      descriptionAr: hasTeams
-        ? `الفعالية عبارة عن مباراة كرة قدم رسمية تتطلب تحديد جهة المشجعين (${event.teams?.home.nameAr} أو ${event.teams?.away.nameAr})`
-        : hasSubEvents
-        ? `تتضمن الفعالية ${subEvents.length} جولات فرعية تتطلب اختيار الجولة والوقت المناسب`
-        : 'تحديد يوم وتوقيت الفعالية من بين المواعيد المتاحة على المنصة',
+    });
+  }
+
+  // 2. Sub-events / Fixtures (Only if genuine multi-fixture / sub-events exist)
+  if (hasSubEvents && subEvents.length > 1) {
+    requiredSteps.push({
+      id: 'step_fixture_selection',
+      stepNumber: currentStepNum++,
+      name: 'Select Tournament Sub-event / Fixture',
+      nameAr: 'تحديد الجولة أو الجلسة الفرعية',
+      badgeAr: `${subEvents.length} عروض وجولات فرعية`,
+      descriptionAr: `تتضمن الفعالية ${subEvents.length} جولات فرعية تتطلب اختيار الجولة والوقت المناسب`,
       isMandatory: true,
       isApplicable: true,
-    },
-    {
-      id: 'step_seating_tiers',
-      stepNumber: 3,
-      name: isSeated && !bookingSeatsWithoutMap
-        ? 'Fetch Seating Map & Pick Exact Seats'
-        : 'Fetch Pricing Tiers & Select Ticket Quantity',
-      nameAr: isSeated && !bookingSeatsWithoutMap
-        ? 'جلب مخطط المقاعد واختيار مقاعد رقمية محددة'
-        : 'جلب فئات الأسعار وتحديد كمية التذاكر وباقات الدخول',
-      badgeAr: isSeated && !bookingSeatsWithoutMap
-        ? 'مخطط مقاعد رقمي تفاعلي (Seated Venue)'
-        : 'دخول عام وتذاكر بدون مقاعد (General Admission)',
-      descriptionAr: isSeated && !bookingSeatsWithoutMap
-        ? `القاعة تتطلب ترقيماً دقيقاً للمقاعد (is_seated: true). يتم جلب المخطط وتحديد المقاعد بالصف والعمود`
-        : `الفعالية دخول عام أو باقات بدون مخطط مقاعد (is_seated: false). يتم تحديد فئة التذكرة والكمية فوراً`,
+    });
+  }
+
+  // 3. Date & Showtime Slot (Only if multiple dates or time slots exist)
+  if (hasMultipleDates || hasTimeSlots) {
+    requiredSteps.push({
+      id: 'step_datetime_selection',
+      stepNumber: currentStepNum++,
+      name: 'Select Event Date & Time Slot',
+      nameAr: 'تحديد موعد وتاريخ الفعالية الرسمي',
+      badgeAr: 'المواعيد المتاحة',
+      descriptionAr: 'تحديد يوم وتوقيت الفعالية من بين المواعيد المتاحة على المنصة',
       isMandatory: true,
       isApplicable: true,
-    },
-    {
-      id: 'step_cart_hold',
-      stepNumber: 4,
-      name: 'POST Add to Cart & Capture Session Cart ID',
-      nameAr: 'إرسال طلب POST لحجز المقاعد واقتناص معرف السلة cart_id',
-      badgeAr: 'طلب POST فعلي مع ترويسة التوثيق',
-      descriptionAr: 'تنفيذ طلب POST حقيقي لنقطة نهاية السلة، والتقاط المعرف الرسمي cart_id ورمز الجلسة sessionToken',
+    });
+  }
+
+  // 4. Seating Map OR Tier Selection
+  if (isSeated && !bookingSeatsWithoutMap) {
+    requiredSteps.push({
+      id: 'step_seating_selection',
+      stepNumber: currentStepNum++,
+      name: 'Fetch Seating Map & Pick Exact Seats',
+      nameAr: 'مخطط المقاعد وتحديد الصفوف والمقاعد الدقيقة',
+      badgeAr: 'مخطط مقاعد رقمي تفاعلي (Seated Venue)',
+      descriptionAr: 'القاعة تتطلب ترقيماً دقيقاً للمقاعد (is_seated: true). يتم جلب المخطط وتحديد المقاعد بالصف والعمود',
       isMandatory: true,
       isApplicable: true,
-    },
-    {
-      id: 'step_dynamic_checkout',
-      stepNumber: 5,
-      name: 'Generate Dynamic Checkout URL with Active cart_id',
-      nameAr: 'توليد رابط الدفع الديناميكي الرسمي لمنع أخطاء 404',
-      badgeAr: 'رابط دفع نشط وموثق 100%',
-      descriptionAr: 'تكوين رابط الدفع المشفر الحامل لمعرف السلة النشط (cart_id) للانتقال المباشر وتفادي 404',
+    });
+  } else {
+    requiredSteps.push({
+      id: 'step_tier_selection',
+      stepNumber: currentStepNum++,
+      name: 'Fetch Pricing Tiers & Select Ticket Quantity',
+      nameAr: 'فئات التذاكر وباقات الدخول العامة',
+      badgeAr: 'دخول عام وتذاكر بدون مقاعد (General Admission)',
+      descriptionAr: 'الفعالية دخول عام أو باقات بدون مخطط مقاعد (is_seated: false). يتم تحديد فئة التذكرة والكمية فوراً',
       isMandatory: true,
       isApplicable: true,
-    },
-  ];
+    });
+  }
+
+  // 5. Checkout & Official Payment
+  requiredSteps.push({
+    id: 'step_checkout_payment',
+    stepNumber: currentStepNum++,
+    name: 'Order Review & Official PayTabs Checkout',
+    nameAr: 'مراجعة الطلب وبوابة PayTabs الرسمية',
+    badgeAr: 'الدفع المباشر المعتمد (Zero 404)',
+    descriptionAr: 'مراجعة تفاصيل التذاكر، قفل المقاعد فورياً في خوادم Webook الرسمية (10 دقائق)، والتحويل الفوري لبوابة PayTabs السعودية المعتمدة',
+    isMandatory: true,
+    isApplicable: true,
+  });
 
   return {
     isSeated,

@@ -3,26 +3,27 @@ import { WebookEvent } from '../types/bot';
 
 export class SchemaWorkflowService {
   /**
-   * Fetches the dynamic workflow schema from the official platform API proxy
+   * Fetches the dynamic workflow schema directly from the official Webook API proxy in real-time.
+   * Zero fallback mock data or simulated schemas.
    */
-  async fetchEventWorkflowSchema(slug: string, fallbackEvent?: WebookEvent): Promise<DynamicEventWorkflowSchema> {
-    try {
-      const response = await fetch(`/api/webook/event-workflow-schema/${encodeURIComponent(slug)}`);
-      if (response.ok) {
-        const json = await response.json();
-        if (json && json.success && json.data) {
-          return json.data as DynamicEventWorkflowSchema;
-        }
-      }
-    } catch (err) {
-      console.warn('[SchemaWorkflowService] Server endpoint failed, falling back to local schema parser:', err);
+  async fetchEventWorkflowSchema(slug: string, token?: string): Promise<DynamicEventWorkflowSchema> {
+    const cleanToken = token?.trim() || (typeof window !== 'undefined' ? localStorage.getItem('webook_bearer_token')?.trim() : undefined);
+    const headers: Record<string, string> = { 'Accept': 'application/json' };
+    if (cleanToken) {
+      headers['Authorization'] = `Bearer ${cleanToken}`;
     }
 
-    if (fallbackEvent) {
-      return this.parseEventToSchema(fallbackEvent);
+    const response = await fetch(`/api/webook/event-workflow-schema/${encodeURIComponent(slug)}`, {
+      headers,
+    });
+
+    const json = await response.json().catch(() => null);
+    if (!response.ok || !json || !json.success || !json.data) {
+      const errorMsg = json?.message || `فشل جلب مخطط الفعالية (${slug}) من خوادم Webook الرسمية (كود HTTP ${response.status})`;
+      throw new Error(errorMsg);
     }
 
-    throw new Error(`Failed to load schema for event: ${slug}`);
+    return json.data as DynamicEventWorkflowSchema;
   }
 
   /**
@@ -30,13 +31,21 @@ export class SchemaWorkflowService {
    */
   parseEventToSchema(event: WebookEvent): DynamicEventWorkflowSchema {
     const isSeated = Boolean(event.isSeated ?? (event.seatingMap && event.seatingMap.seats && event.seatingMap.seats.length > 0));
-    const hasTeams = Boolean(event.teams && event.teams.home && event.teams.away);
+    const hasTeams = Boolean(
+      event.teams && 
+      event.teams.home && 
+      event.teams.away && 
+      (event.teams.home.name || event.teams.home.nameAr) && 
+      (event.teams.away.name || event.teams.away.nameAr)
+    );
     const hasSubEvents = Boolean(event.subEvents && event.subEvents.length > 1);
-    const dates = event.datesAvailable?.length ? event.datesAvailable : ['2026-10-15', '2026-10-16'];
-    const times = event.timesAvailable?.length ? event.timesAvailable : ['18:00 - 20:30', '20:30 - 23:00'];
-    const tiers = event.tiers?.length ? event.tiers : [
-      { id: 'regular', name: 'Regular Entry', nameAr: 'تذكرة الدخول الأساسية', price: 65, available: true }
-    ];
+    const dates = (event.datesAvailable && event.datesAvailable.length > 0) 
+      ? event.datesAvailable 
+      : (event.date ? [event.date] : []);
+    const times = (event.timesAvailable && event.timesAvailable.length > 0) 
+      ? event.timesAvailable 
+      : [];
+    const tiers = event.tiers || [];
 
     const steps: DynamicWorkflowStep[] = [];
     let stepNumber = 1;

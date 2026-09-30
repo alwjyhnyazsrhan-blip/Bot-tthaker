@@ -154,9 +154,10 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
 
     const loadSchema = async () => {
       try {
+        const effectiveToken = formValues.authToken?.trim() || localStorage.getItem('webook_bearer_token')?.trim() || undefined;
         const generated = await schemaWorkflowService.fetchEventWorkflowSchema(
           currentEvent.slug || currentEvent.id,
-          currentEvent
+          effectiveToken
         );
         if (isMounted) {
           setSchema(generated);
@@ -217,7 +218,10 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
       setIsLoadingSeatingMap(true);
       try {
         const slug = currentEvent.slug || currentEvent.id;
-        const res = await fetch(`/api/webook/seating-map/${encodeURIComponent(slug)}`);
+        const effectiveToken = formValues.authToken?.trim() || localStorage.getItem('webook_bearer_token')?.trim() || undefined;
+        const headers: Record<string, string> = { 'Accept': 'application/json' };
+        if (effectiveToken) headers['Authorization'] = `Bearer ${effectiveToken}`;
+        const res = await fetch(`/api/webook/seating-map/${encodeURIComponent(slug)}`, { headers });
         if (res.ok) {
           const json = await res.json();
           if (isMounted && json && json.success) {
@@ -652,8 +656,17 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
       }
 
       if (step.type === 'payment_verification') {
-        const activeCartId = activeCart?.cartId || ('wbk_cart_' + Date.now().toString(36).toUpperCase());
-        const activeOrderRef = activeCart?.orderReference || ('WBK-ORD-' + Date.now().toString(36).toUpperCase());
+        if (!activeCart?.cartId) {
+          setIsRunningStep(false);
+          updateStepLog(step.id, {
+            status: 'failed',
+            message: 'لا توجد سلة حجز رسمية نشطة تم حجزها عبر خوادم Webook. يرجى حجز المقاعد في السلة أولاً.',
+          });
+          return false;
+        }
+
+        const activeCartId = activeCart.cartId;
+        const activeOrderRef = activeCart.orderReference || ('WBK-ORD-' + activeCartId.slice(-6).toUpperCase());
 
         setIsVerifyingPayment(true);
         const res = await fetch('/api/webook/verify-payment', {
@@ -766,8 +779,16 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
   }, [schema]);
 
   const handleVerifyPaymentManual = async (targetOrderRef?: string, targetCartId?: string) => {
-    const activeCartId = targetCartId || manualCartId || activeCart?.cartId || ('wbk_cart_' + Date.now().toString(36).toUpperCase());
-    const activeOrderRef = targetOrderRef || manualOrderRef || activeCart?.orderReference || ('WBK-ORD-' + Date.now().toString(36).toUpperCase());
+    const activeCartId = targetCartId || manualCartId || activeCart?.cartId;
+    const activeOrderRef = targetOrderRef || manualOrderRef || activeCart?.orderReference;
+
+    if (!activeCartId && !activeOrderRef) {
+      setVerifyMessage({
+        type: 'error',
+        text: 'يرجى تقديم معرّف سلة صالح أو مرجع طلب رسمي صادر من خوادم Webook للتحقق من الدفع.',
+      });
+      return;
+    }
 
     setIsVerifyingPayment(true);
     setVerifyMessage(null);
@@ -1223,100 +1244,121 @@ export const DynamicSchemaWorkflow: React.FC<DynamicSchemaWorkflowProps> = ({
           )}
 
           {/* 2. Team Stand Selection Step (ONLY for matches with teams) */}
-          {currentStepObj.type === 'team_stand_selection' && currentEvent.teams && (
-            <div className="space-y-4 animate-in fade-in">
-              <div className="text-xs font-bold text-slate-300 flex items-center gap-2">
-                <Trophy className="w-4 h-4 text-amber-400" />
-                <span>اختر جهة تشجيع الفريق وبوابة الدخول:</span>
+          {currentStepObj.type === 'team_stand_selection' && (() => {
+            const teamField = currentStepObj.fields?.find(f => f.type === 'team_selector' || f.name === 'selectedTeam');
+            const homeOpt = teamField?.options?.find(o => o.value === 'home');
+            const awayOpt = teamField?.options?.find(o => o.value === 'away');
+            const homeName = currentEvent.teams?.home?.nameAr || homeOpt?.labelAr || homeOpt?.label || 'الفريق المضيف';
+            const awayName = currentEvent.teams?.away?.nameAr || awayOpt?.labelAr || awayOpt?.label || 'الفريق الضيف';
+
+            return (
+              <div className="space-y-4 animate-in fade-in">
+                <div className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                  <Trophy className="w-4 h-4 text-amber-400" />
+                  <span>اختر جهة تشجيع الفريق وبوابة الدخول:</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setFormValues((v) => ({ ...v, selectedTeam: 'home' }))}
+                    className={`p-4 rounded-xl border text-center transition cursor-pointer ${
+                      formValues.selectedTeam === 'home'
+                        ? 'bg-blue-950/40 border-blue-500 ring-2 ring-blue-500/40 text-white'
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900'
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center mx-auto mb-2 text-sm shadow-md">
+                      1
+                    </div>
+                    <div className="text-sm font-bold">{homeName}</div>
+                    <div className="text-[11px] text-blue-400 font-mono mt-0.5">مدرجات الفريق المضيف (Home Stand)</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFormValues((v) => ({ ...v, selectedTeam: 'away' }))}
+                    className={`p-4 rounded-xl border text-center transition cursor-pointer ${
+                      formValues.selectedTeam === 'away'
+                        ? 'bg-rose-950/40 border-rose-500 ring-2 ring-rose-500/40 text-white'
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900'
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-rose-600 text-white font-bold flex items-center justify-center mx-auto mb-2 text-sm shadow-md">
+                      2
+                    </div>
+                    <div className="text-sm font-bold">{awayName}</div>
+                    <div className="text-[11px] text-rose-400 font-mono mt-0.5">مدرجات الفريق الضيف (Away Stand)</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFormValues((v) => ({ ...v, selectedTeam: 'neutral' }))}
+                    className={`p-4 rounded-xl border text-center transition cursor-pointer ${
+                      formValues.selectedTeam === 'neutral'
+                        ? 'bg-purple-950/40 border-purple-500 ring-2 ring-purple-500/40 text-white'
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900'
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-purple-600 text-white font-bold flex items-center justify-center mx-auto mb-2 text-sm shadow-md">
+                      ★
+                    </div>
+                    <div className="text-sm font-bold">المنصة المحايدة / مقصورات VIP</div>
+                    <div className="text-[11px] text-purple-400 font-mono mt-0.5">منطقة الواجهة وكبار الشخصيات</div>
+                  </button>
+                </div>
               </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setFormValues((v) => ({ ...v, selectedTeam: 'home' }))}
-                  className={`p-4 rounded-xl border text-center transition cursor-pointer ${
-                    formValues.selectedTeam === 'home'
-                      ? 'bg-blue-950/40 border-blue-500 ring-2 ring-blue-500/40 text-white'
-                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900'
-                  }`}
-                >
-                  <div className="w-10 h-10 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center mx-auto mb-2 text-sm shadow-md">
-                    1
-                  </div>
-                  <div className="text-sm font-bold">{currentEvent.teams.home.nameAr}</div>
-                  <div className="text-[11px] text-blue-400 font-mono mt-0.5">مدرجات الفريق المضيف (Home Stand)</div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setFormValues((v) => ({ ...v, selectedTeam: 'away' }))}
-                  className={`p-4 rounded-xl border text-center transition cursor-pointer ${
-                    formValues.selectedTeam === 'away'
-                      ? 'bg-rose-950/40 border-rose-500 ring-2 ring-rose-500/40 text-white'
-                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900'
-                  }`}
-                >
-                  <div className="w-10 h-10 rounded-full bg-rose-600 text-white font-bold flex items-center justify-center mx-auto mb-2 text-sm shadow-md">
-                    2
-                  </div>
-                  <div className="text-sm font-bold">{currentEvent.teams.away.nameAr}</div>
-                  <div className="text-[11px] text-rose-400 font-mono mt-0.5">مدرجات الفريق الضيف (Away Stand)</div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setFormValues((v) => ({ ...v, selectedTeam: 'neutral' }))}
-                  className={`p-4 rounded-xl border text-center transition cursor-pointer ${
-                    formValues.selectedTeam === 'neutral'
-                      ? 'bg-purple-950/40 border-purple-500 ring-2 ring-purple-500/40 text-white'
-                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900'
-                  }`}
-                >
-                  <div className="w-10 h-10 rounded-full bg-purple-600 text-white font-bold flex items-center justify-center mx-auto mb-2 text-sm shadow-md">
-                    ★
-                  </div>
-                  <div className="text-sm font-bold">المنصة المحايدة / مقصورات VIP</div>
-                  <div className="text-[11px] text-purple-400 font-mono mt-0.5">منطقة الواجهة وكبار الشخصيات</div>
-                </button>
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* 3. Fixtures / Sub-Events Step */}
-          {currentStepObj.type === 'fixture_selection' && currentEvent.subEvents && (
-            <div className="space-y-3 animate-in fade-in">
-              <label className="block text-xs font-bold text-slate-300">
-                الجولات والجلسات المتاحة للفعالية:
-              </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {currentEvent.subEvents.map((se) => {
-                  const isPicked = formValues.selectedSubEventId === se.id;
-                  return (
-                    <div
-                      key={se.id}
-                      onClick={() => setFormValues((v) => ({
-                        ...v,
-                        selectedSubEventId: se.id,
-                        selectedDate: se.date,
-                        selectedTime: se.time,
-                      }))}
-                      className={`p-3.5 rounded-xl border transition cursor-pointer flex items-center justify-between ${
-                        isPicked
-                          ? 'bg-purple-950/40 border-purple-500 ring-2 ring-purple-500/30'
-                          : 'bg-slate-900/60 border-slate-800 hover:bg-slate-900'
-                      }`}
-                    >
-                      <div>
-                        <div className="text-xs font-bold text-white">{se.titleAr}</div>
-                        <div className="text-[10px] text-slate-400 font-mono mt-1">{se.date} • {se.time}</div>
+          {currentStepObj.type === 'fixture_selection' && (() => {
+            const fixtureField = currentStepObj.fields?.find(f => f.type === 'fixture_selector' || f.name === 'selectedSubEventId');
+            const subList = (currentEvent.subEvents && currentEvent.subEvents.length > 0)
+              ? currentEvent.subEvents
+              : (fixtureField?.options || []).map(opt => ({
+                  id: opt.value,
+                  title: opt.label,
+                  titleAr: opt.labelAr || opt.label,
+                  date: opt.metadata?.date || '2026-10-15',
+                  time: opt.metadata?.time || '20:00 - 22:30',
+                }));
+
+            return (
+              <div className="space-y-3 animate-in fade-in">
+                <label className="block text-xs font-bold text-slate-300">
+                  الجولات والجلسات المتاحة للفعالية ({subList.length} جولات):
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {subList.map((se) => {
+                    const isPicked = formValues.selectedSubEventId === se.id;
+                    return (
+                      <div
+                        key={se.id}
+                        onClick={() => setFormValues((v) => ({
+                          ...v,
+                          selectedSubEventId: se.id,
+                          selectedDate: se.date,
+                          selectedTime: se.time,
+                        }))}
+                        className={`p-3.5 rounded-xl border transition cursor-pointer flex items-center justify-between ${
+                          isPicked
+                            ? 'bg-purple-950/40 border-purple-500 ring-2 ring-purple-500/30'
+                            : 'bg-slate-900/60 border-slate-800 hover:bg-slate-900'
+                        }`}
+                      >
+                        <div>
+                          <div className="text-xs font-bold text-white">{se.titleAr}</div>
+                          <div className="text-[10px] text-slate-400 font-mono mt-1">{se.date} • {se.time}</div>
+                        </div>
+                        {isPicked && <Check className="w-4 h-4 text-purple-400 shrink-0" />}
                       </div>
-                      {isPicked && <Check className="w-4 h-4 text-purple-400 shrink-0" />}
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* 4. Date & Showtime Step */}
           {currentStepObj.type === 'datetime_selection' && (

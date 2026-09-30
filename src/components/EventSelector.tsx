@@ -100,24 +100,21 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
     return matchesSearch && matchesCategory;
   });
 
-  const handleSimulateNewRelease = async () => {
-    setIsSimulatingRelease(true);
+  const handleRefreshLiveCatalog = async () => {
+    setIsFetchingLive(true);
     setReleaseFeedback('');
     try {
-      const ok = await webookSyncManager.triggerReleaseSimulation(
-        'نهائي كأس السوبر السعودي: الهلال ضد الاتحاد (المملكة أرينا)',
-        'المملكة أرينا، الرياض'
-      );
-      if (ok) {
-        setReleaseFeedback('تم رصد طرح الفعالية الجديدة في المنصة وحقنها فوراً في البوت!');
-        setTimeout(() => setReleaseFeedback(''), 6000);
-      } else {
-        setReleaseFeedback('فشل محاكاة الطرح');
+      const cleanToken = authToken.trim() || localStorage.getItem('webook_bearer_token')?.trim();
+      const loaded = await webookSyncManager.fetchAllEventsWithPagination(cleanToken);
+      if (onUpdateEvents) {
+        onUpdateEvents(loaded);
       }
+      setReleaseFeedback(`تم تحديث دليل الفعاليات مباشرة من منصة Webook (${loaded.length} فعالية نشطة)`);
+      setTimeout(() => setReleaseFeedback(''), 5000);
     } catch (err: any) {
-      setReleaseFeedback(err.message);
+      setReleaseFeedback(`خطأ في الاتصال بخوادم Webook: ${err.message}`);
     } finally {
-      setIsSimulatingRelease(false);
+      setIsFetchingLive(false);
     }
   };
 
@@ -264,17 +261,7 @@ export const EventSelector: React.FC<EventSelectorProps> = ({
                 description: t.description ? String(t.description).replace(/<[^>]*>/g, '').trim() : undefined,
               };
             })
-          : [
-              {
-                id: 'standard',
-                name: 'Standard Ticket',
-                nameAr: 'تذكرة قياسية معتمدة',
-                price: Number(item.starting_price || item.price || 65),
-                available: true,
-                remaining: 25,
-                color: '#3b82f6',
-              }
-            ];
+          : [];
 
         totalTiersCount += mappedTiers.length;
 

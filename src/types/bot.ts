@@ -179,7 +179,7 @@ export interface EventJsonSchema {
   requiredSteps: DynamicPipelineStepConfig[];
 }
 
-export type PipelineStepNumber = 1 | 2 | 3 | 4 | 5;
+export type PipelineStepNumber = number;
 
 export interface PipelineStepLog {
   step: PipelineStepNumber;
